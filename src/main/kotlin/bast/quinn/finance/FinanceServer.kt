@@ -13,7 +13,7 @@ import java.time.LocalDateTime
 fun Application.serveRoutes(database: FinanceJdbcProvider) {
     routing {
         singlePageApplication {
-            vue("vue")
+            vue("vue/finance-vue/dist")
         }
         // Get a list of all categories.
         // Used to regex vendors to determine a category.
