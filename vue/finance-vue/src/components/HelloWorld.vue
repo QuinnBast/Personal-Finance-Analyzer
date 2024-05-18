@@ -1,15 +1,28 @@
 <script setup>
+import axios from "axios";
+
+function getCategories() {
+  axios({
+    method: 'get',
+    url: 'http://localhost:9000/categories'
+  }).then((success) => {
+    console.log(success.data)
+  })
+}
+
+
 defineProps({
   msg: {
     type: String,
     required: true
-  }
+  },
 })
 </script>
 
 <template>
   <div class="greetings">
     <h1 class="green">{{ msg }}</h1>
+    <BButton @click="getCategories()"></BButton>
     <h3>
       You’ve successfully created a project with
       <a href="https://vitejs.dev/" target="_blank" rel="noopener">Vite</a> +
