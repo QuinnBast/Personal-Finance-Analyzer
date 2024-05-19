@@ -9,6 +9,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import java.time.LocalDateTime
+import java.util.*
 
 fun Application.serveRoutes(database: FinanceJdbcProvider) {
     routing {
@@ -17,7 +18,7 @@ fun Application.serveRoutes(database: FinanceJdbcProvider) {
         }
         // Get a list of all categories.
         // Used to regex vendors to determine a category.
-        get("categories") {
+        get("vendor-categories") {
             val results = database.getPosCategories()
             val asSerializableMode: List<VendorCategoryApiModel> = results.map {
                 VendorCategoryApiModel.fromVendorCategory(it)
@@ -28,7 +29,16 @@ fun Application.serveRoutes(database: FinanceJdbcProvider) {
         // Get recent Transactions
         // Default to transactions within the month, but accept query params to change the default.
         get("transactions") {
-            call.respond<TransactionList>(TransactionList(database.getTrasactionsWithinMonth(LocalDateTime.now().minusMonths(4)).map { TransactionApiModel.fromTransaction(it) }))
+            var monthsAgo = call.request.queryParameters["monthsAgo"]?.toInt()
+            if (monthsAgo == null) {
+                // Default to 1 month ago.
+                monthsAgo = 1
+            }
+
+            val endDate = LocalDateTime.now()
+            val startDate = LocalDateTime.now().minusMonths(monthsAgo.toLong()).withDayOfMonth(1)
+
+            call.respond<TransactionList>(TransactionList(database.getTransactionsinRange(startDate, endDate).map { TransactionApiModel.fromTransaction(it) }))
         }
 
         // Import a list of transactions from CSV data.

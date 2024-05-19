@@ -1,10 +1,12 @@
 package bast.quinn.finance.database
 
+import bast.quinn.finance.database.Transactions.date
 import org.ktorm.database.Database
 import org.ktorm.dsl.*
 import org.ktorm.entity.add
 import org.ktorm.entity.filter
 import org.ktorm.entity.toList
+import org.slf4j.LoggerFactory
 import java.sql.SQLException
 import java.time.LocalDateTime
 import java.time.temporal.TemporalAdjusters.firstDayOfMonth
@@ -26,37 +28,50 @@ class FinanceJdbcProvider(
     connectionString: String
 ) :  FinancialDataProvider {
 
+    companion object {
+        val logger = LoggerFactory.getLogger(FinanceJdbcProvider::class.java)!!
+    }
+
     val database = Database.connect(connectionString)
 
     init {
         try {
             DatabaseMigrations(connectionString).performMigrations()
         } catch (e: SQLException) {
-            e.printStackTrace(System.err)
+            logger.error(e.stackTraceToString())
         }
     }
 
 
     override fun getPosCategories(): List<VendorCategory> {
-        return database.vendorCategories.toList()
+        val categories = database.vendorCategories.toList()
+        logger.info("Fetched ${categories.size} categories")
+        return categories
     }
 
     override fun getTrasactionsSince(date: LocalDateTime): List<Transaction> {
-        return database.transactions.filter { it.date greater date }.toList()
+        val transactions = database.transactions.filter { it.date greater date }.toList()
+        logger.info("Fetched ${transactions.size} transactions since $date")
+        return transactions
     }
 
     override fun getTrasactionsWithinMonth(date: LocalDateTime): List<Transaction> {
         val startOfMonth = date.with(firstDayOfMonth())
         val endOfMonth = date.with(lastDayOfMonth())
 
-        return getTransactionsinRange(startOfMonth, endOfMonth)
+        val transactions = getTransactionsinRange(startOfMonth, endOfMonth)
+        logger.info("Fetched ${transactions.size} transactions within month")
+        return transactions
     }
 
     override fun getTransactionsinRange(startDate: LocalDateTime, endDate: LocalDateTime): List<Transaction> {
-        return database.transactions.filter { (it.date greaterEq startDate) and (it.date lessEq endDate) }.toList()
+        val transactions = database.transactions.filter { (it.date greaterEq startDate) and (it.date lessEq endDate) }.toList()
+        logger.info("Fetched ${transactions.size} transactions between $startDate and $endDate")
+        return transactions
     }
 
     override fun insertCategory(category: VendorCategory): Int {
+        logger.info("Inserting category $category")
         return database.vendorCategories.add(category)
     }
 
@@ -76,6 +91,7 @@ class FinanceJdbcProvider(
     }
 
     override fun insertTransaction(transaction: Transaction): Int {
+        logger.info("Inserting transaction $transaction")
         return database.transactions.add(transaction)
     }
 
@@ -98,6 +114,5 @@ class FinanceJdbcProvider(
             }.toList()
         }
     }
-
 
 }

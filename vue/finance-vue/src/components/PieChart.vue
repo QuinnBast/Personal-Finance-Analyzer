@@ -28,7 +28,7 @@ export default {
         ]
       },
       options: {
-        responsive: false,
+        responsive: true,
         maintainAspectRatio: false,
         plugins: {
           title: {

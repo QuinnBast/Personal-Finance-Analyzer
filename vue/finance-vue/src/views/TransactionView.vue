@@ -196,7 +196,7 @@ function formatChartData() {
         <BContainer class="m-4" v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
           <h3><b>Total:</b> ${{ sumTransactions() }}</h3>
           <h3><b>Total (w/o Investments):</b> ${{ sumTransactions(true, true, true) }}</h3>
-          <BRow>
+          <BRow style="height: 400px">
             <BCol>
               <PieChart :valueMap="sumTransactionsByField('categoryOverride', true, false)" :title="'Income: $' + sumTransactions(true, false)"/>
             </BCol>
@@ -210,7 +210,7 @@ function formatChartData() {
         </BContainer>
       </BCard>
 
-      <BCard class="text-center m-3" :key="monthsAgo">
+      <BCard class="text-center m-3" :key="monthsAgo" >
         <div v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
           <Line :data="chartData" :options="chartOptions" style="width: 100%" />
         </div>
@@ -222,7 +222,7 @@ function formatChartData() {
       <BCard class="text-center m-3" :key="monthsAgo">
         <h2>Insights</h2>
         <BContainer class="m-4" v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
-          <BRow>
+          <BRow style="height: 400px">
             <BCol>
               <PieChart :valueMap="sumTransactionsByField('location', false)" title="Location"/>
             </BCol>
