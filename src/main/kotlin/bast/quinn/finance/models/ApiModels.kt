@@ -65,3 +65,8 @@ data class NewVendorResponse(
     var status: String,
     var insertId: Int,
 )
+
+@Serializable
+data class DeleteVendorCategoryRequest(
+    var id: Int,
+)

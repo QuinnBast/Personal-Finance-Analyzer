@@ -35,6 +35,10 @@ class PersonalFinanceMain {
             install(CORS) {
                 anyHost()
                 allowHeader(HttpHeaders.ContentType)
+                allowMethod(HttpMethod.Put)
+                allowMethod(HttpMethod.Delete)
+                allowMethod(HttpMethod.Post)
+                allowMethod(HttpMethod.Get)
             }
             install(CallLogging)
             install(ContentNegotiation) { json() }

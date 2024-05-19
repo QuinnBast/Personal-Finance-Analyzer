@@ -3,6 +3,7 @@ package bast.quinn.finance
 import bast.quinn.finance.database.FinanceJdbcProvider
 import bast.quinn.finance.database.VendorCategory
 import bast.quinn.finance.models.*
+import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.http.content.*
 import io.ktor.server.request.*
@@ -56,6 +57,16 @@ fun Application.serveRoutes(database: FinanceJdbcProvider) {
             })
 
             call.respond(NewVendorResponse("Success", result))
+        }
+
+        delete("delete-vendor") {
+            val deleteRequest = call.request.queryParameters["id"]?.toInt()
+            if (deleteRequest != null) {
+                database.deletePosCategory(deleteRequest)
+                call.respond(HttpStatusCode.OK)
+            } else {
+                call.respond(HttpStatusCode.BadRequest)
+            }
         }
     }
 }

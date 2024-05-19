@@ -4,6 +4,7 @@ import bast.quinn.finance.database.Transactions.date
 import org.ktorm.database.Database
 import org.ktorm.dsl.*
 import org.ktorm.entity.add
+import org.ktorm.entity.drop
 import org.ktorm.entity.filter
 import org.ktorm.entity.toList
 import org.slf4j.LoggerFactory
@@ -15,6 +16,7 @@ import java.time.temporal.TemporalAdjusters.lastDayOfMonth
 
 interface FinancialDataProvider {
     fun getPosCategories():List<VendorCategory>
+    fun deletePosCategory(index:Int): Int
     fun getTrasactionsSince(date: LocalDateTime): List<Transaction>
     fun getTrasactionsWithinMonth(date: LocalDateTime): List<Transaction>
     fun getTransactionsinRange(startDate: LocalDateTime, endDate: LocalDateTime): List<Transaction>
@@ -47,6 +49,14 @@ class FinanceJdbcProvider(
         val categories = database.vendorCategories.toList()
         logger.info("Fetched ${categories.size} categories")
         return categories
+    }
+
+    override fun deletePosCategory(index: Int): Int {
+        val vendor = database.vendorCategories.filter { it.id eq index }.toList()
+        if(vendor.size > 0) {
+            return vendor[0].delete()
+        }
+        return 0
     }
 
     override fun getTrasactionsSince(date: LocalDateTime): List<Transaction> {

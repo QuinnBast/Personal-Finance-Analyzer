@@ -32,6 +32,13 @@ function getCategories() {
   })
 }
 
+function deleteVendor(index) {
+  var toDelete = categoryList.value[index]
+  axios.delete("http://localhost:9000/delete-vendor?id=" + toDelete.id).then((success) => {
+    categoryList.value = categoryList.value.filter((it) => it !== toDelete)
+  })
+}
+
 getCategories()
 </script>
 
@@ -40,6 +47,8 @@ getCategories()
     <BContainer class="m-2">
       <BButton size="lg" variant="success">Add Category</BButton>
     </BContainer>
+
+    <h3>{{ categoryList.length}} Categories</h3>
 
     <BFormInput
         id="filter-input"
@@ -60,7 +69,7 @@ getCategories()
         emptyText="No data"
     >
       <template #cell(actions)="row">
-          <BButton size="sm" @click="row.toggleDetails" variant="danger">Delete</BButton>
+          <BButton size="sm" @click="deleteVendor(row.index)" variant="danger">Delete</BButton>
       </template>
     </BTable>
   </div>
