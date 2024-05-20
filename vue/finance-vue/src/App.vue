@@ -5,6 +5,7 @@ import {  RouterView } from 'vue-router'
 <template>
   <div>
     <Navigation/>
+    <BToastOrchestrator />
 
     <div>
       <RouterView />

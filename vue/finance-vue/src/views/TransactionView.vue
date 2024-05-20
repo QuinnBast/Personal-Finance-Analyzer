@@ -2,7 +2,7 @@
 import BarChart from "@/components/BarChart.vue";
 import {ref, reactive} from "vue";
 import moment from 'moment';
-import {BTable} from 'bootstrap-vue-next';
+import {BTable, useToast} from 'bootstrap-vue-next';
 import zoomPlugin from 'chartjs-plugin-zoom';
 import {
   Chart as ChartJS,
@@ -33,7 +33,8 @@ ChartJS.register(
     zoomPlugin
 )
 
-const show = ref(false)
+const shouldShow = ref(false)
+const {show} = useToast()
 
 const sortFields = [
   {key: 'date', sortable: true},
@@ -52,9 +53,11 @@ const monthsAgo = ref(2)
 
 function getTransactions() {
   return axios.get(`http://localhost:9000/transactions?monthsAgo=` + monthsAgo.value).then((success) => {
-    // console.log(success)
+    show?.({ props: {title: "Success", body: "Found " + success.data.transactions.length + " transactions within the past " + monthsAgo.value + " months.", variant: "success", pos: "bottom-right" }})
     transactionList.value = success.data.transactions;
     formatChartData()
+  }, (failure) => {
+    show?.({ props: {title: "Failed to get transactions", body: failure.message, variant: "danger", pos: "bottom-right" }})
   })
 }
 
@@ -109,13 +112,20 @@ getTransactions()
 function sumTransactions(income = true, expenses = true, ignoreInvestments = false) {
   var total = 0
   transactionList.value.forEach((transaction) => {
-    if((expenses && transaction.amount < 0) || (income && transaction.amount > 0)) {
-      if(ignoreInvestments) {
-        if(transaction.categoryOverride !== "Investment") {
+    // Corrections should only apply to expenses to reduce them.
+    if(transaction.purchaseType === "Correction") {
+      if(expenses) {
+        total += transaction.amount
+      }
+    } else {
+      if ((expenses && transaction.amount < 0) || (income && transaction.amount > 0)) {
+        if (ignoreInvestments) {
+          if (transaction.categoryOverride !== "Investment") {
+            total += transaction.amount
+          }
+        } else {
           total += transaction.amount
         }
-      } else {
-        total += transaction.amount
       }
     }
   })
@@ -125,20 +135,38 @@ function sumTransactions(income = true, expenses = true, ignoreInvestments = fal
 function sumTransactionsByField(field, income = true, expenses = true) {
   var categoryTotals = {}
 
+  function addToCategoryTotal(transaction) {
+    var categoryName = transaction[field]
+
+    if(categoryName === "" || categoryName === undefined) {
+      categoryName = "Unknown"
+    }
+
+    if (categoryTotals[categoryName] === undefined) {
+      categoryTotals[categoryName] = transaction.amount;
+    } else {
+      categoryTotals[categoryName] += transaction.amount;
+    }
+  }
+
+  var shouldCountAsExpense = (transaction) => expenses && transaction.amount < 0
+  var shouldCountAsIncome = (transaction) => income && transaction.amount > 0
+
   transactionList.value.forEach((transaction) => {
-    if((expenses && transaction.amount < 0) || (income && transaction.amount > 0)) {
-      var categoryName = transaction[field]
-
-      if(categoryName === "" || categoryName === undefined) {
-        categoryName = "Unknown"
+    // If the transaction is a Correction we need to:
+    // Consider it in expenses - even if we made money from it.
+    // But not consider it in income.
+    if(transaction.purchaseType === "Correction") {
+      if(expenses) {
+        addToCategoryTotal(transaction)
       }
-
-      if (categoryTotals[categoryName] === undefined) {
-        categoryTotals[categoryName] = transaction.amount;
-      } else {
-        categoryTotals[categoryName] += transaction.amount;
+    } else {
+      if(shouldCountAsExpense(transaction) || shouldCountAsIncome(transaction)) {
+        addToCategoryTotal(transaction)
       }
     }
+
+
   });
 
   return categoryTotals;
@@ -183,7 +211,7 @@ function formatChartData() {
 <template>
   <main>
     <div>
-      <BDropdown v-model="show" text="TimeScale" class="m-3">
+      <BDropdown v-model="shouldShow" text="TimeScale" class="m-3">
         <BDropdownItem @click="changeTimeRange(1)">1 Month</BDropdownItem>
         <BDropdownItem @click="changeTimeRange(3)">3 Months</BDropdownItem>
         <BDropdownItem @click="changeTimeRange(6)">6 Months</BDropdownItem>
@@ -191,7 +219,7 @@ function formatChartData() {
         <BDropdownItem @click="changeTimeRange(900)">All</BDropdownItem>
       </BDropdown>
 
-      <BCard class="text-center m-3" :key="monthsAgo">
+      <BCard class="text-center m-3" :key="sumTransactions(true, false)">
         <h2>{{monthsAgo}} Month Summary</h2>
         <BContainer class="m-4" v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
           <h3><b>Total:</b> ${{ sumTransactions() }}</h3>
@@ -210,7 +238,7 @@ function formatChartData() {
         </BContainer>
       </BCard>
 
-      <BCard class="text-center m-3" :key="monthsAgo" >
+      <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
         <div v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
           <Line :data="chartData" :options="chartOptions" style="width: 100%" />
         </div>
@@ -219,7 +247,7 @@ function formatChartData() {
         </div>
       </BCard>
 
-      <BCard class="text-center m-3" :key="monthsAgo">
+      <BCard class="text-center m-3" :key="sumTransactions(true, false)">
         <h2>Insights</h2>
         <BContainer class="m-4" v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
           <BRow style="height: 400px">

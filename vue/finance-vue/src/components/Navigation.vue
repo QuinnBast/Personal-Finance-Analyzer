@@ -6,7 +6,7 @@
   <BNav pills class="p-4 custom-nav">
     <BNavItem href="/">Home</BNavItem>
     <BNavItem href="/categories">Category List</BNavItem>
-    <BNavItem href="/import"><BButton variant="success">Import</BButton></BNavItem>
+    <BNavItem href="/import">Import</BNavItem>
   </BNav>
 </template>
 

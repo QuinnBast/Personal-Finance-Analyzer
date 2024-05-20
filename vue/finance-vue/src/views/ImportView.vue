@@ -1,8 +1,10 @@
 <script setup>
 import {ref} from "vue";
-import {BTable} from "bootstrap-vue-next";
+import {BTable, useToast} from "bootstrap-vue-next";
 import axios from "axios";
+import moment from 'moment';
 
+const {show} = useToast()
 const files = ref([])
 const categoryList = ref([])
 const transactionsToImport = ref([])
@@ -36,7 +38,7 @@ const fields = [
   {
     key: 'category',
     label: 'Category',
-    sortable: true,
+    sortable: false,
     sortDirection: 'desc',
   },
   {
@@ -44,7 +46,7 @@ const fields = [
     label: 'Amount',
     sortable: true,
     sortDirection: 'desc',
-  },
+  }
 ]
 
 function readFiles() {
@@ -66,6 +68,7 @@ function getCategories() {
 getCategories()
 
 function readFileContent(evt) {
+  var tempId = 0;
   var fileContent = evt.target.result
   fileContent.split("\n").forEach((line) => {
     if(line === "") {
@@ -73,7 +76,8 @@ function readFileContent(evt) {
     }
     var tokens = line.split(",")
 
-    var shortDate = tokens[0]
+    tempId += 1
+    var shortDate = moment(tokens[0]).format("YYYY-MM-DDTHH:mm:ss")
     var purchaseAmount = tokens[1]
     var unknown = tokens[2]
     var type = tokens[3]
@@ -97,9 +101,15 @@ function readFileContent(evt) {
 
     // Lookup category...
     var category = "Unknown"
-    var foundFromList = categoryList.value.filter((it) => vendorString !== "POS" && vendorString === it.vendor)
+    var foundFromList = categoryList.value.filter((it) => vendorString === it.vendor)
     if(foundFromList.length > 0) {
       category = foundFromList[0].categoryName
+    } else {
+      if(type.includes("Bill Payment")) {
+        category = "Bills"
+      } else if (type.includes("Payroll Deposit")) {
+        category = "Job"
+      }
     }
 
     transactionsToImport.value.push({
@@ -112,11 +122,104 @@ function readFileContent(evt) {
     })
   })
 }
+
+const newCategory = ref({})
+const createCategoryModal = ref(false)
+function addCategoryModal(item) {
+  newCategory.value = {
+    vendor: item.vendor,
+    category: item.category
+  }
+  createCategoryModal.value = true
+}
+
+function createCategory() {
+  axios.post("http://localhost:9000/add-vendor", JSON.stringify(newCategory.value), {headers: {'Content-Type': 'application/json'}}).then(
+      (success) => {
+        show?.({ props: {title: "Successfully created Category", body: "Created category (" + newCategory.value.vendor + " -> " + newCategory.value.category + ")", variant: "success", pos: "bottom-right" }})
+
+        // Update any transactions in the list matching the vendor to have the new category.
+        var updatedTransactions = 0
+        transactionsToImport.value.forEach((transaction) => {
+          if(transaction.vendor === newCategory.value.vendor) {
+            transaction.category = newCategory.value.category
+            updatedTransactions += 1
+          }
+        })
+        show?.({ props: {title: "Import Updated", body: updatedTransactions.toString() + " transactions were updated with the new vendor.", variant: "success", pos: "bottom-right" }})
+        newCategory.value = {
+          vendor: "",
+          category: ""
+        }
+      }, (failure) => {
+        show?.({ props: {title: "Failed to create Category", body: failure.message, variant: "danger", pos: "bottom-right" }})
+      }
+  )
+}
+
+function importTransactions() {
+  var data = {
+    transactions: transactionsToImport.value
+  }
+  axios.post("http://localhost:9000/import-transactions", JSON.stringify(data), {headers: {'Content-Type': 'application/json'}}).then(
+      (success) => {
+        show?.({ props: {title: "Successful import.", body: "Imported " + transactionsToImport.value.length + " transactions.", variant: "success", pos: "bottom-right" }})
+        transactionsToImport.value = []
+        files.value = []
+      }, (failure) => {
+        show?.({ props: {title: "Failed to import " + transactionsToImport.value.length + " transactions.", body: failure.message, variant: "danger", pos: "bottom-right" }})
+      }
+  )
+}
+
+function checkUnknown(transaction) {
+  return transaction.category !== null && transaction.category !== "Unknown" && transaction.category !== ""
+}
 </script>
 
 <template>
   <div>
     <BFormFile v-model="files" label="Upload files" multiple accept="text/csv" @update:modelValue="readFiles" />
+
+    <BModal
+        v-model="createCategoryModal"
+        id="modal-center"
+        centered
+        title="New Category"
+        cancel-title="Cancel"
+        cancel-variant="danger"
+        ok-title="Create"
+        ok-variant="success"
+        @ok="createCategory">
+      <BForm>
+        <BFormGroup
+            class="p-2 m-2"
+            id="input-vendor-regex"
+            label-for="vendorName"
+        >
+          <BInputGroup prepend="Vendor Regex">
+            <BFormInput
+                id="vendorName"
+                v-model="newCategory.vendor"
+                type="text"
+                placeholder="Vendor"
+                required
+            />
+          </BInputGroup>
+        </BFormGroup>
+
+        <BInputGroup prepend="Category" class="p-2 m-2">
+          <BFormInput
+              id="category"
+              v-model="newCategory.category"
+              type="text"
+              placeholder="Category"
+              required
+          />
+        </BInputGroup>
+      </BForm>
+    </BModal>
+
     <div class="mt-3">
       Files: <strong>{{ files.map((file) => file.name).join(",") }}</strong>
       <BPagination
@@ -135,8 +238,21 @@ function readFileContent(evt) {
           :fields="fields"
           :per-page="perPage"
           :current-page="currentPage"
-          emptyText="No data"
-      />
+          :sortInternal="false"
+          emptyText="No data">
+        <template #cell(category)="row">
+          <BFormInput
+              :id="row.item.tempId"
+              v-model="row.item.category"
+              type="text"
+              @blur="addCategoryModal(row.item)"
+              :state="checkUnknown(row.item)"
+          />
+          <BFormInvalidFeedback :state="checkUnknown(row.item)">
+            Unknown Category
+          </BFormInvalidFeedback>
+        </template>
+      </BTable>
       <BPagination
           v-model="currentPage"
           :total-rows="transactionsToImport.length"
@@ -147,6 +263,8 @@ function readFileContent(evt) {
           :limit="5"
       />
     </div>
+
+    <BButton @click="importTransactions" variant="success">Import</BButton>
   </div>
 </template>
 
