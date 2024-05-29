@@ -4,17 +4,53 @@ import {BTable, useToast} from "bootstrap-vue-next";
 import axios from "axios";
 
 const categoryList = ref([])
+const matchingExistingCategories = ref([])
 const filterText = ref("")
 const createCategoryModal = ref(false)
+const regexTest = ref("")
+
+const updateCategoryModal = ref(false)
+var selectedCategory = {
+  id: 0,
+  vendor: "",
+  categoryName: "",
+  regexMaybe: "",
+}
 
 const {show} = useToast()
 
 var newCategoryInput = {
   vendor: "",
-  category: ""
+  category: "",
+  regexMaybe: "",
 }
 
 const fieldTypes = [
+  {
+    key: 'vendor',
+    label: 'Vendor',
+    sortable: true,
+    sortDirection: 'desc',
+  },
+  {
+    key: 'categoryName',
+    label: 'Category',
+    sortable: true,
+    sortDirection: 'desc',
+  },
+  {
+    key: 'regexMaybe',
+    label: 'Regex',
+    sortable: true,
+    sortDirection: 'desc',
+  },
+  {
+    key: 'actions',
+    label: 'Actions',
+  }
+]
+
+const regexMatchFieldTypes = [
   {
     key: 'vendor',
     label: 'Vendor',
@@ -46,6 +82,7 @@ function deleteVendor(toDelete) {
   axios.delete("http://localhost:9000/delete-vendor?id=" + toDelete.id).then((success) => {
     show?.({ props: {title: "Success", body: "Deleted category: " + toDelete.vendor, variant: "success", pos: "bottom-right" }})
     categoryList.value = categoryList.value.filter((it) => it !== toDelete)
+    matchingExistingCategories.value = matchingExistingCategories.value.filter((it) => it !== toDelete)
   }, (failure) => {
     show?.({ props: {title: "Failed to delete category for " + toDelete.vendor, body: failure.message, variant: "danger", pos: "bottom-right" }})
   })
@@ -54,22 +91,97 @@ function deleteVendor(toDelete) {
 getCategories()
 
 function createCategory() {
+  if(newCategoryInput.regexMaybe === "" ) {
+    newCategoryInput.regexMaybe = null
+  }
   axios.post("http://localhost:9000/add-vendor", JSON.stringify(newCategoryInput), {headers: {'Content-Type': 'application/json'}}).then(
       (success) => {
         categoryList.value.push({
           vendor: newCategoryInput.vendor,
-          categoryName: newCategoryInput.category,
+          category: newCategoryInput.category,
+          regexMaybe: newCategoryInput.regexMaybe,
           id: success.data.insertId
         })
         show?.({ props: {title: "Successfully created Category", body: "Created category (" + newCategoryInput.vendor + " -> " + newCategoryInput.category + ")", variant: "success", pos: "bottom-right" }})
         newCategoryInput = {
           vendor: "",
-          category: ""
+          category: "",
+          regexMaybe: ""
         }
       }, (failure) => {
         show?.({ props: {title: "Failed to create Category", body: failure.message, variant: "danger", pos: "bottom-right" }})
       }
   )
+}
+
+const validateRegex = computed(() => {
+  var regex = getRegexp()
+  if(regex !== null) {
+    return regex.test(regexTest.value.toUpperCase())
+  } else {
+    return false
+  }
+})
+
+function getExistingMatchingCategories() {
+  var regex = getRegexp()
+
+  if(regex !== null) {
+    matchingExistingCategories.value = categoryList.value
+        .filter((it) => regex.test(it.vendor.toUpperCase()))
+  } else {
+    matchingExistingCategories.value = []
+  }
+}
+
+function getRegexp() {
+  var matchRegex = ""
+  if(updateCategoryModal.value) {
+    matchRegex = selectedCategory.regexMaybe
+  } else {
+    matchRegex = newCategoryInput.regexMaybe
+  }
+
+  if(matchRegex !== null && matchRegex !== "") {
+    return new RegExp(matchRegex.toUpperCase(), 'g')
+  } else {
+    return null
+  }
+}
+
+function editVendor(categoryToUpdate) {
+  updateCategoryModal.value = true
+  matchingExistingCategories.value = []
+  selectedCategory = {
+    id: categoryToUpdate.id,
+    vendor: categoryToUpdate.vendor,
+    categoryName: categoryToUpdate.categoryName,
+    regexMaybe: categoryToUpdate.regexMaybe
+  }
+}
+
+function updateCategory() {
+    if(selectedCategory.regexMaybe === "" ) {
+      selectedCategory.regexMaybe = null
+    }
+
+    axios.post("http://localhost:9000/update-category", JSON.stringify(selectedCategory), {headers: {'Content-Type': 'application/json'}}).then(
+        (success) => {
+          // Update list in place.
+          const indexToReplace = categoryList.value.findIndex((it) => it.id === selectedCategory.id)
+          categoryList.value.splice(indexToReplace, 1, selectedCategory)
+
+          show?.({ props: {title: "Successfully updated Category", body: "Updated category (" + selectedCategory.vendor + " -> " + selectedCategory.category + ")", variant: "success", pos: "bottom-right" }})
+          selectedCategory = {
+            id: 0,
+            vendor: "",
+            categoryName: "",
+            regexMaybe: "",
+          }
+        }, (failure) => {
+          show?.({ props: {title: "Failed to update Category", body: failure.message, variant: "danger", pos: "bottom-right" }})
+        }
+    )
 }
 </script>
 
@@ -95,7 +207,7 @@ function createCategory() {
             id="input-vendor-regex"
             label-for="vendorName"
         >
-          <BInputGroup prepend="Vendor Regex">
+          <BInputGroup prepend="Vendor Name">
             <BFormInput
                 id="vendorName"
                 v-model="newCategoryInput.vendor"
@@ -109,12 +221,120 @@ function createCategory() {
         <BInputGroup prepend="Category" class="p-2 m-2">
           <BFormInput
               id="category"
-              v-model="newCategoryInput.category"
+              v-model="newCategoryInput.categoryName"
               type="text"
               placeholder="Category"
               required
           />
         </BInputGroup>
+
+        <BInputGroup prepend="Optional Regex" class="p-2 m-2">
+          <BFormInput
+              id="regex"
+              v-model="newCategoryInput.regexMaybe"
+              type="text"
+              placeholder="Regex"
+              required
+              @change="getExistingMatchingCategories"
+          />
+        </BInputGroup>
+
+        <BInputGroup prepend="Regex Test String" class="p-2 m-2">
+          <BFormInput
+              id="regexTest"
+              v-model="regexTest"
+              type="text"
+              placeholder="Regex Test String"
+              required
+              :state="validateRegex"
+          />
+
+        </BInputGroup>
+
+        <BTable
+            :key="matchingExistingCategories"
+            :items="matchingExistingCategories"
+            :fields="regexMatchFieldTypes"
+            emptyText="No existing categories match"
+        >
+          <template #cell(actions)="row">
+            <BButton size="sm" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
+          </template>
+        </BTable>
+      </BForm>
+    </BModal>
+
+    <BModal
+        v-model="updateCategoryModal"
+        id="update-modal"
+        centered
+        title="Update Category"
+        cancel-title="Cancel"
+        cancel-variant="danger"
+        ok-title="Update"
+        ok-variant="primary"
+        @ok="updateCategory">
+      <BForm>
+        <BFormGroup
+            class="p-2 m-2"
+            id="input-vendor-regex"
+            label-for="vendorName"
+        >
+          <BInputGroup prepend="Vendor Name">
+            <BFormInput
+                id="vendorName"
+                v-model="selectedCategory.vendor"
+                type="text"
+                placeholder="Vendor"
+                required
+            />
+          </BInputGroup>
+        </BFormGroup>
+
+        <BInputGroup prepend="Category" class="p-2 m-2">
+          <BFormInput
+              id="category"
+              v-model="selectedCategory.categoryName"
+              type="text"
+              placeholder="Category"
+              required
+          />
+        </BInputGroup>
+
+        <BInputGroup prepend="Optional Regex" class="p-2 m-2">
+          <BFormInput
+              id="regex"
+              v-model="selectedCategory.regexMaybe"
+              type="text"
+              placeholder="Regex"
+              required
+              @change="getExistingMatchingCategories"
+          />
+        </BInputGroup>
+
+        <BInputGroup prepend="Regex Test String" class="p-2 m-2">
+          <BFormInput
+              id="regexTest"
+              v-model="regexTest"
+              type="text"
+              placeholder="Regex Test String"
+              required
+              :state="validateRegex"
+          />
+
+        </BInputGroup>
+
+        <BTable
+            :key="matchingExistingCategories"
+            :items="matchingExistingCategories"
+            :fields="regexMatchFieldTypes"
+            emptyText="No existing categories match"
+        >
+          <template #cell(actions)="row">
+            <BButton size="sm" v-if="row.item.id !== selectedCategory.id" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
+            <BBadge variant="warning" v-else>Editing</BBadge>
+          </template>
+        </BTable>
       </BForm>
     </BModal>
 
@@ -128,19 +348,17 @@ function createCategory() {
     />
 
     <BTable
-        :key="listSize"
         :sort-by="[{key: 'vendor', order: 'asc'}]"
         :fields="fieldTypes"
         :items="categoryList"
-        :per-page="perPage"
-        :current-page="currentPage"
         :filterable="['vendor']"
         :filter="filterText"
         :responsive="false"
         emptyText="No data"
     >
       <template #cell(actions)="row">
-          <BButton size="sm" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
+          <BButton class="m-1" size="sm" @click="editVendor(row.item)" variant="primary">Edit</BButton>
+          <BButton class="m-1" size="sm" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
       </template>
     </BTable>
   </div>

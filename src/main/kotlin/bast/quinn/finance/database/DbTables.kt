@@ -22,6 +22,7 @@ object VendorCategories : Table<VendorCategory>("t_vendor_categories") {
     val id = int("id").primaryKey().bindTo { it.id }
     val vendor = varchar("vendor").bindTo { it.vendor }
     val categoryName = varchar("category_name").bindTo { it.categoryName }
+    val regexMaybe = varchar("regex_maybe").bindTo { it.regexMaybe }
 }
 
 // Extension functions to help get tables faster
@@ -46,4 +47,5 @@ interface VendorCategory : Entity<VendorCategory> {
     val id: Int
     var vendor: String
     var categoryName: String
+    var regexMaybe: String?
 }

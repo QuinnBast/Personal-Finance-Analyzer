@@ -3,20 +3,62 @@ package bast.quinn.finance.database
 import io.ktor.server.util.*
 import io.ktor.util.*
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
+import org.ktorm.dsl.*
+import org.ktorm.entity.all
+import org.ktorm.entity.filter
+import org.ktorm.entity.map
+import org.ktorm.entity.toList
 import java.io.FileInputStream
 import java.time.LocalDateTime
 import java.util.*
 
 fun main(args: Array<String>) {
     val database = FinanceJdbcProvider("jdbc:sqlite:finance.db")
-    DatabasePopulator().populateCategoryList(database)
-    DatabasePopulator().populateTransactions(database)
-    println("Database populated! Verifying...")
-    println("${database.getPosCategories().size} categories")
-    println("${database.getTrasactionsSince(LocalDateTime.now().minusMonths(6)).size} transactions in 6 months")
+    DatabasePopulator().deleteCreditTransactions(database)
+    // DatabasePopulator().updateTransactionCategories(database)
+//    DatabasePopulator().populateCategoryList(database)
+//    DatabasePopulator().populateTransactions(database)
+//    println("Database populated! Verifying...")
+//    println("${database.getPosCategories().size} categories")
+//    println("${database.getTrasactionsSince(LocalDateTime.now().minusMonths(6)).size} transactions in 6 months")
 }
 
 class DatabasePopulator {
+    fun deleteCreditTransactions(database :FinanceJdbcProvider) {
+        database.database.delete(Transactions) {
+            it.account eq "Credit"
+        }
+    }
+
+    fun updateTransactionCategories(database: FinanceJdbcProvider) {
+        val vendorList = database.database.vendorCategories.toList()
+        val transactionList = database.database.transactions.toList().forEach { transaction ->
+            // Check if category needs updated.
+            val matchingVendor = vendorList.firstOrNull {
+                if(it.regexMaybe != null && it.regexMaybe != "") {
+                    val regex = Regex(it.regexMaybe!!)
+                    regex.containsMatchIn(transaction.vendor)
+                } else {
+                    it.vendor == transaction.vendor
+                }
+            }
+
+            if(matchingVendor != null) {
+                if(matchingVendor.categoryName != transaction.categoryOverride) {
+
+                    database.database.update(Transactions) {
+                        set(it.categoryOverride, matchingVendor.categoryName)
+                        where {
+                            it.id eq transaction.id
+                        }
+                    }
+
+                    println("${transaction.vendor} updated from ${transaction.categoryOverride} to ${matchingVendor.categoryName}")
+                }
+            }
+        }
+    }
+
     fun populateCategoryList(database: FinanceJdbcProvider) {
         println("Populating category list")
         val fis = FileInputStream("C:\\Users\\Quinn\\Documents\\Coding\\PersonalFinance\\src\\main\\resources\\Budget.xlsm")

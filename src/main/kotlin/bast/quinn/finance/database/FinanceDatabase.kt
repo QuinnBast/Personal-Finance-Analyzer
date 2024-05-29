@@ -1,12 +1,9 @@
 package bast.quinn.finance.database
 
-import bast.quinn.finance.database.Transactions.date
+import bast.quinn.finance.models.UpdateVendorCategoryRequest
 import org.ktorm.database.Database
 import org.ktorm.dsl.*
-import org.ktorm.entity.add
-import org.ktorm.entity.drop
-import org.ktorm.entity.filter
-import org.ktorm.entity.toList
+import org.ktorm.entity.*
 import org.slf4j.LoggerFactory
 import java.sql.SQLException
 import java.time.LocalDateTime
@@ -24,6 +21,9 @@ interface FinancialDataProvider {
     fun insertCategories(categories: List<VendorCategory>): List<Int>
     fun insertTransaction(transaction: Transaction): Int
     fun insertTransactions(transactions: List<Transaction>): List<Int>
+    fun getTransactionMatching(amount: Double, account: String): Transaction?
+    fun getVendorCategoryById(id: Int): VendorCategory?
+    fun updateVendorCategory(updateVendorCategoryRequest: UpdateVendorCategoryRequest): Int
 }
 
 class FinanceJdbcProvider(
@@ -109,6 +109,7 @@ class FinanceJdbcProvider(
         return if(transactions.isEmpty()) {
             listOf()
         } else {
+            logger.info("Imported ${transactions.size} transactions")
             database.batchInsert(database.transactions.sourceTable) {
                 transactions.forEach { transaction ->
                     item {
@@ -125,4 +126,24 @@ class FinanceJdbcProvider(
         }
     }
 
+    override fun getTransactionMatching(amount: Double, account: String): Transaction? {
+        return database.transactions.filter {
+            (it.amount eq amount) and (it.account eq account)
+        }.firstOrNull()
+    }
+
+    override fun getVendorCategoryById(id: Int): VendorCategory? {
+        return database.vendorCategories.find { it.id eq id }
+    }
+
+    override fun updateVendorCategory(updateVendorCategoryRequest: UpdateVendorCategoryRequest): Int {
+        return database.update(VendorCategories) {
+            set(it.vendor, updateVendorCategoryRequest.vendor)
+            set(it.categoryName, updateVendorCategoryRequest.categoryName)
+            set(it.regexMaybe, updateVendorCategoryRequest.regexMaybe)
+            where {
+                it.id eq updateVendorCategoryRequest.id
+            }
+        }
+    }
 }

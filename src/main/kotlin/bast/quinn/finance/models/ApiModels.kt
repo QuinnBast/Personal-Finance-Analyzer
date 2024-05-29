@@ -44,29 +44,61 @@ data class VendorCategoryApiModel(
     val id: Int,
     var vendor: String,
     var categoryName: String,
+    var regexMaybe: String?
 ) {
     companion object {
         fun fromVendorCategory(category: VendorCategory) = VendorCategoryApiModel(
             category.id,
             category.vendor,
             category.categoryName,
+            category.regexMaybe
         )
     }
 }
 
 @Serializable
 data class NewVendorRequest(
-    var vendor: String,
-    var categoryName: String,
+    val vendor: String,
+    val category: String,
+    val regexMaybe: String?
 )
 
 @Serializable
 data class NewVendorResponse(
-    var status: String,
-    var insertId: Int,
+    val status: String,
+    val insertId: Int,
 )
 
 @Serializable
-data class DeleteVendorCategoryRequest(
-    var id: Int,
+data class ImportTransactionRequest(
+    val transactions: List<TransactionRequest>
+)
+
+@Serializable
+data class TransactionRequest(
+    var date: String,
+    var vendor: String,
+    var amount: Double,
+    var account: String,
+    var category: String,
+    var type: String,
+    var location: String,
+)
+
+@Serializable
+data class ImportResult(
+    val insertedIds: List<Int>,
+)
+
+@Serializable
+data class UpdateVendorCategoryRequest(
+    val id: Int,
+    val vendor: String,
+    val categoryName: String,
+    val regexMaybe: String?
+)
+
+@Serializable
+data class UpdateVendorCategoryResponse(
+    val status: String,
 )

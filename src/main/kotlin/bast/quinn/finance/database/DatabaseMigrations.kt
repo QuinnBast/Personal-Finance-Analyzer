@@ -16,6 +16,8 @@ class DatabaseMigrations(
         }
     }
 
+
+
     private fun createTables(statement: Statement) {
         statement.executeUpdate(
             """create table if not exists t_transaction (
@@ -33,7 +35,8 @@ class DatabaseMigrations(
             """create table if not exists t_vendor_categories (
                         id integer primary key autoincrement,
                         vendor string,
-                        category_name string
+                        category_name string,
+                        regex_maybe string
                         )"""
         )
     }
