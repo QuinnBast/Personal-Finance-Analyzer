@@ -12,6 +12,7 @@ const currentPage = ref(1)
 const perPage = 30
 const regexTest = ref("")
 const matchingExistingCategories = ref([])
+const account = ref("Chequing")
 const fields = [
   {
     key: 'date',
@@ -96,25 +97,58 @@ getCategories()
 
 function readFileContent(evt) {
   var fileContent = evt.target.result
-  fileContent.split("\n").forEach((line) => {
-    if(line === "") {
+  fileContent.split("\n").forEach((line, index) => {
+    if(line === "" || index ===  0) {
+      if(index === 0) {
+        // Try to dynamically determine the account type so the user doesn't have to set it.
+        const headerRegex = /(.*),(.*),(.*),(.*),(.*),(.*),(.*)/g
+        const headerTokens = headerRegex.exec(line);
+
+        if(headerTokens.length === 0) {
+          show?.({ props: {title: "Unable to parse file.", body: "File format must have changed. Check ImportView.vue", variant: "danger", pos: "bottom-right" }})
+          return;
+        }
+
+        if(headerTokens[5] === "Status") {
+          account.value = "Credit";
+        } else {
+          account.value = "Chequing";
+        }
+      }
       return
     }
-    var tokens = line.split(",")
 
-    if(tokens.length === 5) {
+    if(account.value === "Chequing") {
+      const regex = /(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\")/g
+      const tokens = regex.exec(line);
+
+      if(tokens.length === 0) {
+        show?.({ props: {title: "Unable to parse file.", body: "File format must have changed. Check ImportView.vue", variant: "danger", pos: "bottom-right" }})
+        return;
+      }
+
       transactionsToImport.value.push(parseChequingTransaction(tokens))
-    } else if(tokens.length === 3) {
+    } else if(account.value === "Credit") {
+      const regex = /(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\")/g
+      const tokens = regex.exec(line);
+
+      if(tokens.length === 0) {
+        show?.({ props: {title: "Unable to parse file.", body: "File format must have changed. Check ImportView.vue", variant: "danger", pos: "bottom-right" }})
+        return;
+      }
+
       transactionsToImport.value.push(parseCreditTransaction(tokens))
     }
   })
 }
 
 function parseChequingTransaction(tokens) {
-  var shortDate = moment(tokens[0]).format("YYYY-MM-DDTHH:mm:ss")
-  var purchaseAmount = tokens[1]
-  var unknown = tokens[2]
+  var fullString = tokens[0]
+  var filter = tokens[1]
+  var shortDate = moment(tokens[2].replaceAll('\"', "").trim(), "YYYY-MM-DD").format("YYYY-MM-DDTHH:mm:ss")
   var type = tokens[3]
+  var purchaseAmount = tokens[6].replaceAll('\"', "")
+  var unknown = tokens[2]
   if(type !== undefined && type !== null && type !== "") {
     type = type.replaceAll('\"', "").trim()
   }
@@ -142,18 +176,18 @@ function parseChequingTransaction(tokens) {
     vendor: vendorString,
     location: locationString,
     category: category,
-    account: "Chequing"
+    account: account
   };
 }
 
 function parseCreditTransaction(tokens) {
-  var shortDate = moment(tokens[0]).format("YYYY-MM-DDTHH:mm:ss")
-  var purchaseAmount = tokens[2]
+  var shortDate = moment(tokens[2].replaceAll('\"', "").trim(), "YYYY-MM-DD").format("YYYY-MM-DDTHH:mm:ss")
+  var purchaseAmount = tokens[7].replaceAll('\"', "")
 
   var vendorString = "Unknown"
   var locationString = "Unknown"
   var category = "Unknown"
-  var vendorAndLocation = tokens[1]
+  var vendorAndLocation = tokens[3]
 
   if(vendorAndLocation !== undefined && vendorAndLocation !== null && vendorAndLocation !== "") {
     vendorAndLocation = vendorAndLocation.replaceAll('\"', "")
@@ -168,7 +202,9 @@ function parseCreditTransaction(tokens) {
       var province = vendorAndLocation.slice(38, 40).trim() // 3 char province name at end
       category = lookupCategoryForVendor(vendor)
 
-      locationString = city + ", " + province
+      if(city.trim() !== "") {
+        locationString = city + ", " + province
+      }
       vendorString = vendor
     }
   }
@@ -180,7 +216,7 @@ function parseCreditTransaction(tokens) {
     vendor: vendorString,
     location: locationString,
     category: category,
-    account: "Credit"
+    account: account
   };
 }
 
@@ -294,8 +330,19 @@ function getRegexp() {
 </script>
 
 <template>
-  <div>
-    <BFormFile v-model="files" label="Upload files" multiple accept="text/csv" @update:modelValue="readFiles" />
+  <BContainer>
+
+    <BRow class="p-3">
+      <BCol>
+        <BDropdown :text="account">
+          <BDropdownItem @click="value => account = value.target.innerText">Chequing</BDropdownItem>
+          <BDropdownItem @click="value => account = value.target.innerText">Credit</BDropdownItem>
+        </BDropdown>
+      </BCol>
+      <BCol cols="9">
+        <BFormFile v-model="files" multiple accept="text/csv" @update:modelValue="readFiles"/>
+      </BCol>
+    </BRow>
 
     <BModal
         v-model="createCategoryModal"
@@ -414,7 +461,7 @@ function getRegexp() {
     </div>
 
     <BButton @click="importTransactions" variant="success">Import</BButton>
-  </div>
+  </BContainer>
 </template>
 
 <style scoped>
