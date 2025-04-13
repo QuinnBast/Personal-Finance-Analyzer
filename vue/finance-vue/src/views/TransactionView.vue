@@ -47,9 +47,41 @@ const sortFields = [
 ]
 
 const transactionList = reactive(ref([]));
-const perPage = 30;
+const perPage = 50;
 const currentPage = ref(1)
 const monthsAgo = ref(2)
+
+
+const monthlyCategoryList = reactive(ref([]));
+const categoryPerPage = 100;
+const categoryCurrentPage = ref(1)
+
+const filterText = ref("")
+
+function categoryListToTableList() {
+  // Have: [{month, monthlyTotal, Category}]
+  // Need: [{month, c1Total, c2Total, c3Total, ....}]
+
+  var months = monthlyCategoryList.value
+      .map((it) => it.month)
+  var uniqueMonths = [...new Set(months)]
+
+  var rows = uniqueMonths.map((month) => {
+    var monthlyTotals = monthlyCategoryList.value.filter((it) => it.month === month)
+
+    var monthlyTotal = monthlyTotals.reduce((acc, value) => acc + value.value, 0)
+
+    // Need to transform each "category" into a key, and then sum it.
+    return monthlyTotals.reduce((acc, value) => {
+      acc[value.category] = Math.round(value.value * 100) / 100
+      return acc
+    }, { month: month, total: Math.round(monthlyTotal * 100) / 100 })
+  })
+
+  rows.sort((a, b) => moment(a.month, "MMMM YYYY") - moment(b.month, "MMMM YYYY"))
+
+  return rows
+}
 
 function getTransactions() {
   return axios.get(`http://localhost:9000/transactions?monthsAgo=` + monthsAgo.value).then((success) => {
@@ -66,14 +98,9 @@ function changeTimeRange(newMonthsAgo) {
   getTransactions()
 }
 
-const chartOptions = {
+const categoryChartData = {
   responsive: true,
   maintainAspectRatio: false,
-  scales: {
-    xAxes: {
-      type: 'time',
-    }
-  },
   plugins: {
     autocolors,
     title: {
@@ -82,7 +109,7 @@ const chartOptions = {
       font: {
         size: 36
       },
-      text: "Account History",
+      text: "Monthly Sum",
     },
     zoom: {
       pan: {
@@ -105,7 +132,72 @@ const chartOptions = {
   }
 }
 
-const chartData = ref({})
+const transactionChartData = {
+  responsive: true,
+  maintainAspectRatio: false,
+  scales: {
+    xAxes: {
+      type: 'time',
+    },
+    y: {
+      grid: {
+        lineWidth: function(context) {
+          if(context.tick.value === 0) {
+            return 3
+          }
+          return 1
+        },
+        color: function(context) {
+          if(context.tick.value === 0) {
+            return "#000000"
+          }
+          return "#717171"
+        }
+      }
+    }
+  },
+  plugins: {
+    autocolors,
+    title: {
+      display: true,
+      fullSize: true,
+      font: {
+        size: 36
+      },
+    },
+    tooltip: {
+      callbacks: {
+        afterBody: function(context) {
+          var transaction = context[0].raw.transaction
+          return `Vendor: ${transaction.vendor}\n` +
+            `Amount: ${transaction.amount}\n` +
+            `Category: ${transaction.categoryOverride}\n`
+        }
+      }
+    },
+    zoom: {
+      pan: {
+        enabled: true,
+        mode: 'xy',
+      },
+      limits: {
+        // axis limits
+      },
+      zoom: {
+        wheel: {
+          enabled: true,
+        },
+        pinch: {
+          enabled: true
+        },
+        mode: 'xy',
+      }
+    }
+  }
+}
+
+const categorySpendingPerMonthChartData = ref({})
+const allTransactionChartData = ref({})
 
 getTransactions()
 
@@ -172,39 +264,97 @@ function sumTransactionsByField(field, income = true, expenses = true) {
   return categoryTotals;
 }
 
-function formatChartData() {
-  chartData.value = {
-    labels: [],
-    datasets: []
-  }
+function getCumulativeTransactionHistory() {
+  var currentBalance = 0
+  var data = transactionList.value
+      .sort((a, b) => b.amount - a.amount)
+      .sort((a, b) => moment(a.date, "YYYY-MM-DDTHH:mm") - moment(b.date, "YYYY-MM-DDTHH:mm"))
+      .map((transaction) => {
+        currentBalance = currentBalance + transaction.amount
+        return {
+          x: moment(transaction.date, "YYYY-MM-DDTHH:mm"),
+          y: currentBalance,
+          transaction: transaction
+        }
+      })
 
+  return [{
+    label: "Account",
+    data: data,
+  }]
+}
+
+function getMonthlySpendingByCategory() {
+  monthlyCategoryList.value = []
+  // Get month names
+  var monthsAsList = transactionList.value
+      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY"))
+
+  // Filter unique values
+  var months = [...new Set(monthsAsList)]
+  var entries = []
+
+  // Get unique category names
   var categoryList = transactionList.value.map((it) => it.categoryOverride)
   var categories = [...new Set(categoryList)]
+      .map((categoryName) => {
+        return {
+          label: categoryName,
+          data: [],
+        }
+      })
 
   categories.forEach((category) => {
-    var currentTotal = 0
-    var elements = transactionList.value
-        .filter((transaction) => transaction.categoryOverride === category)
-        .sort((a, b) => moment(a.date, "YYYY-MM-DDTHH:mm") - moment(b.date, "YYYY-MM-DDTHH:mm"))
-        .map((transaction) => { return {x: moment(transaction.date, "YYYY-MM-DDTHH:mm"), y: transaction.amount }})
-        .reduce((acc, curr) => {
-            if(acc.some((element) => element.x.isSame(curr.x))) {
-              acc.filter((it) => it.x.isSame(curr.x))[0].y += curr.y
-            } else {
-              acc.push(curr)
-            }
-            return acc
-          }, [])
-        .map((transaction) => {
-          currentTotal += transaction.y
-          return {x: transaction.x, y: currentTotal }
-        })
 
-    chartData.value.datasets.push({
-      label: category,
-      data: elements,
+    var transactionsInCategory = transactionList.value
+        .filter((transaction) => transaction.categoryOverride === category.label)
+
+    // Also loop each month...
+    months.forEach((month) => {
+      var monthlyTotal = transactionsInCategory
+          .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
+          .reduce((acc, value) => acc + value.amount, 0)
+
+      category.data.push({x: month, y: monthlyTotal})
+
+      entries.push({x: month, y: monthlyTotal})
+      monthlyCategoryList.value.push({
+        category: category.label,
+        month: month,
+        value: monthlyTotal,
+      })
     })
   })
+
+  return categories
+}
+
+function filterTable(item, filter) {
+  return item.month.startsWith(filter)
+}
+
+function sumColumn(items, field) {
+  return items.reduce((acc, item) => acc + item[field.key], 0)
+}
+
+function formatChartData() {
+  // Get month names
+  var monthsAsList = transactionList.value
+      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY"))
+
+  // Filter unique values
+  var months = [...new Set(monthsAsList)]
+
+  // Populate chart data.
+  categorySpendingPerMonthChartData.value = {
+    labels: months,
+    datasets: getMonthlySpendingByCategory()
+  }
+
+  allTransactionChartData.value = {
+    labels: [],
+    datasets: getCumulativeTransactionHistory()
+  }
 }
 </script>
 
@@ -216,12 +366,17 @@ function formatChartData() {
         <BDropdownItem @click="changeTimeRange(3)">3 Months</BDropdownItem>
         <BDropdownItem @click="changeTimeRange(6)">6 Months</BDropdownItem>
         <BDropdownItem @click="changeTimeRange(12)">1 Year</BDropdownItem>
+        <BDropdownItem @click="changeTimeRange(24)">2 Years</BDropdownItem>
+        <BDropdownItem @click="changeTimeRange(36)">3 Years</BDropdownItem>
+        <BDropdownItem @click="changeTimeRange(48)">4 Years</BDropdownItem>
+        <BDropdownItem @click="changeTimeRange(60)">5 Years</BDropdownItem>
+        <BDropdownItem @click="changeTimeRange(600)">10 Years</BDropdownItem>
         <BDropdownItem @click="changeTimeRange(900)">All</BDropdownItem>
       </BDropdown>
 
       <BCard class="text-center m-3" :key="sumTransactions(true, false)">
         <h2>{{monthsAgo}} Month Summary</h2>
-        <BContainer class="m-4" v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
+        <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
           <h3><b>Total:</b> ${{ sumTransactions() }}</h3>
           <h3><b>Total (w/o Investments):</b> ${{ sumTransactions(true, true, true) }}</h3>
           <BRow style="height: 400px">
@@ -239,17 +394,99 @@ function formatChartData() {
       </BCard>
 
       <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
-        <div v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
-          <Line :data="chartData" :options="chartOptions" style="width: 100%" />
+        <h2>{{monthsAgo}} Month Total</h2>
+        <div v-if="allTransactionChartData.datasets?.length !== undefined && allTransactionChartData.datasets.length > 0">
+          <Line :data="allTransactionChartData" :options="transactionChartData" style="width: 100%" />
         </div>
         <div v-else>
           <h1>No data</h1>
         </div>
       </BCard>
 
+      <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
+        <div v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+          <Line :data="categorySpendingPerMonthChartData" :options="categoryChartData" style="width: 100%" />
+        </div>
+        <div v-else>
+          <h1>No data</h1>
+        </div>
+      </BCard>
+
+      <BCard class="text-center m-3" >
+        <h2>Category Totals</h2>
+
+        <BFormGroup
+            class="p-2 m-2"
+            id="input-vendor-regex"
+            label-for="filterText"
+        >
+          <BInputGroup prepend="Month Filter">
+            <BFormInput
+                id="filterText"
+                v-model="filterText"
+                type="text"
+                placeholder="Month Filter"
+            />
+          </BInputGroup>
+        </BFormGroup>
+
+        <BContainer v-if="categoryListToTableList().length !== undefined && categoryListToTableList().length > 0">
+
+          <BPagination
+              v-model="categoryCurrentPage"
+              :total-rows="monthlyCategoryList.length"
+              :per-page="categoryPerPage"
+              class="justify-content-center"
+              first-number
+              last-number
+              :limit="5"
+          />
+          <BTable
+              :key="listSize"
+              :sort-by="[{key: 'date', order: 'desc'}]"
+              :items="categoryListToTableList()"
+              :per-page="categoryPerPage"
+              :current-page="categoryCurrentPage"
+              :filterable="['month']"
+              :filter="filterText"
+              :filter-function="filterTable"
+              emptyText="No data"
+              striped
+              small
+              bordered
+              responsive
+          >
+            <template #custom-foot="ctx">
+              <BTr>
+                <BTh v-for="field in ctx.fields">
+                  <p v-if="field.key === 'month'">
+                    TOTAL:
+                  </p>
+                  <p v-else>
+                    {{ Math.round(sumColumn(ctx.items, field) * 100) / 100 }}
+                  </p>
+                </BTh>
+              </BTr>
+            </template>
+          </BTable>
+          <BPagination
+              v-model="categoryCurrentPage"
+              :total-rows="monthlyCategoryList.length"
+              :per-page="categoryPerPage"
+              class="justify-content-center"
+              first-number
+              last-number
+              :limit="5"
+          />
+        </BContainer>
+        <BContainer v-else>
+          <h1>No data</h1>
+        </BContainer>
+      </BCard>
+
       <BCard class="text-center m-3" :key="sumTransactions(true, false)">
         <h2>Insights</h2>
-        <BContainer class="m-4" v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
+        <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
           <BRow style="height: 400px">
             <BCol>
               <PieChart :valueMap="sumTransactionsByField('location', false)" title="Location"/>
@@ -270,7 +507,7 @@ function formatChartData() {
 
       <BCard class="text-center m-3" >
         <h2>Transaction History</h2>
-        <BContainer v-if="chartData.datasets?.length !== undefined && chartData.datasets.length > 0">
+        <BContainer v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
 
           <BPagination
               v-model="currentPage"
