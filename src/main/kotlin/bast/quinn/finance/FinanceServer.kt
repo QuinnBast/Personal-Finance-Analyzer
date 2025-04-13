@@ -50,6 +50,35 @@ fun Application.financeRouting(database: FinancialDataProvider) {
             )
         }
 
+        post("get-transactions") {
+            val transactionQuery = call.receive<OptionalTransaction>()
+
+            if(transactionQuery == null) {
+                call.respond<TransactionList>(TransactionList(emptyList()))
+                return@post
+            }
+
+            val matchingTransactions = database.getTransactions(transactionQuery)
+                .map { TransactionApiModel.fromTransaction(it) }
+
+            call.respond<TransactionList>(
+                TransactionList(matchingTransactions)
+            )
+        }
+
+        post("update-transaction") {
+            val updateRequest = call.receive<UpdateTransactionRequest>()
+
+            val response = database.updateTransaction(updateRequest.id, updateRequest.update)
+            if(response > 0) {
+                this@financeRouting.log.info("Updated transaction ${updateRequest.id} with params: ${updateRequest.update}")
+                call.respond(HttpStatusCode.OK)
+            } else {
+                this@financeRouting.log.info("Failed to update transaction ${updateRequest.id} with params: ${updateRequest.update}")
+                call.respond(HttpStatusCode.BadRequest)
+            }
+        }
+
         // Import a list of transactions from CSV data.
         post("import-transactions") {
             val transactionRequest = call.receive<ImportTransactionRequest>()
@@ -75,15 +104,6 @@ fun Application.financeRouting(database: FinancialDataProvider) {
                         null
                     } else {
                         this@financeRouting.log.info("Could not find a matching transaction for $${requestedTransaction.amount} in $oppositeAccountName account.")
-//                        Transaction {
-//                            date = LocalDateTime.parse(requestedTransaction.date, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
-//                            vendor = requestedTransaction.vendor
-//                            amount = requestedTransaction.amount
-//                            account = requestedTransaction.account
-//                            categoryOverride = requestedTransaction.category
-//                            purchaseType = requestedTransaction.type
-//                            location = requestedTransaction.location
-//                        }
                         null
                     }
                 } else {

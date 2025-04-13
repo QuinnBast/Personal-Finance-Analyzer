@@ -102,3 +102,19 @@ data class UpdateVendorCategoryRequest(
 data class UpdateVendorCategoryResponse(
     val status: String,
 )
+
+@Serializable
+data class UpdateTransactionRequest(
+    val id: Int,
+    val update: OptionalTransaction
+)
+
+@Serializable
+data class OptionalTransaction(
+    var vendor: String?,
+    var amount: Double?,
+    var account: String?,
+    var category: String?,
+    var type: String?,
+    var location: String?,
+)

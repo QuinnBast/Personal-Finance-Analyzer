@@ -1,5 +1,6 @@
 package bast.quinn.finance.database
 
+import bast.quinn.finance.models.OptionalTransaction
 import bast.quinn.finance.models.UpdateVendorCategoryRequest
 import org.ktorm.database.Database
 import org.ktorm.dsl.*
@@ -22,8 +23,10 @@ interface FinancialDataProvider {
     fun insertTransaction(transaction: Transaction): Int
     fun insertTransactions(transactions: List<Transaction>): List<Int>
     fun getTransactionMatching(amount: Double, account: String): Transaction?
+    fun getTransactions(transactionQuery: OptionalTransaction): List<Transaction>
     fun getVendorCategoryById(id: Int): VendorCategory?
     fun updateVendorCategory(updateVendorCategoryRequest: UpdateVendorCategoryRequest): Int
+    fun updateTransaction(id: Int, transactionUpdate: OptionalTransaction): Int
 }
 
 class FinanceJdbcProvider(
@@ -132,6 +135,31 @@ class FinanceJdbcProvider(
         }.firstOrNull()
     }
 
+    override fun getTransactions(transactionQuery: OptionalTransaction): List<Transaction> {
+        var transactions = database.transactions
+
+        if(transactionQuery.vendor != null) {
+            transactions = transactions.filter { (it.vendor like "%${transactionQuery.vendor}%") }
+        }
+        if(transactionQuery.amount != null) {
+            transactions = transactions.filter { (it.amount eq transactionQuery.amount!!) }
+        }
+        if(transactionQuery.account != null) {
+            transactions = transactions.filter { (it.account eq "${transactionQuery.account}") }
+        }
+        if(transactionQuery.category != null) {
+            transactions = transactions.filter { (it.categoryOverride eq "${transactionQuery.category}") }
+        }
+        if(transactionQuery.type != null) {
+            transactions = transactions.filter { (it.purchaseType eq "${transactionQuery.type}") }
+        }
+        if(transactionQuery.location != null) {
+            transactions = transactions.filter { (it.location eq "${transactionQuery.location}") }
+        }
+
+        return transactions.toList()
+    }
+
     override fun getVendorCategoryById(id: Int): VendorCategory? {
         return database.vendorCategories.find { it.id eq id }
     }
@@ -143,6 +171,32 @@ class FinanceJdbcProvider(
             set(it.regexMaybe, updateVendorCategoryRequest.regexMaybe)
             where {
                 it.id eq updateVendorCategoryRequest.id
+            }
+        }
+    }
+
+    override fun updateTransaction(id: Int, transactionUpdate: OptionalTransaction): Int {
+        return database.update(Transactions) {
+            if(transactionUpdate.vendor != null && transactionUpdate.vendor != "") {
+                set(it.vendor, transactionUpdate.vendor)
+            }
+            if(transactionUpdate.amount != null) {
+                set(it.amount, transactionUpdate.amount)
+            }
+            if(transactionUpdate.account != null && transactionUpdate.account != "") {
+                set(it.account, transactionUpdate.account)
+            }
+            if(transactionUpdate.category != null && transactionUpdate.category != "") {
+                set(it.categoryOverride, transactionUpdate.category)
+            }
+            if(transactionUpdate.type != null && transactionUpdate.type != "") {
+                set(it.purchaseType, transactionUpdate.type)
+            }
+            if(transactionUpdate.location != null && transactionUpdate.location != "") {
+                set(it.location, transactionUpdate.location)
+            }
+            where {
+                it.id eq id
             }
         }
     }

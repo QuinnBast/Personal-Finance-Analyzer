@@ -47,13 +47,13 @@ const sortFields = [
 ]
 
 const transactionList = reactive(ref([]));
-const perPage = 50;
+const perPage = 20;
 const currentPage = ref(1)
 const monthsAgo = ref(2)
 
 
 const monthlyCategoryList = reactive(ref([]));
-const categoryPerPage = 100;
+const categoryPerPage = 20;
 const categoryCurrentPage = ref(1)
 
 const filterText = ref("")
@@ -101,6 +101,27 @@ function changeTimeRange(newMonthsAgo) {
 const categoryChartData = {
   responsive: true,
   maintainAspectRatio: false,
+  scales: {
+    x: {
+      type: 'time',
+    },
+    y: {
+      grid: {
+        lineWidth: function(context) {
+          if(context.tick.value === 0) {
+            return 3
+          }
+          return 1
+        },
+        color: function(context) {
+          if(context.tick.value === 0) {
+            return "#000000"
+          }
+          return "#717171"
+        }
+      }
+    }
+  },
   plugins: {
     autocolors,
     title: {
@@ -136,8 +157,13 @@ const transactionChartData = {
   responsive: true,
   maintainAspectRatio: false,
   scales: {
-    xAxes: {
+    x: {
       type: 'time',
+      time: {
+        displayFormats: {
+          quarter: 'MMM YYYY'
+        }
+      }
     },
     y: {
       grid: {
@@ -286,13 +312,14 @@ function getCumulativeTransactionHistory() {
 
 function getMonthlySpendingByCategory() {
   monthlyCategoryList.value = []
-  // Get month names
+  // Get months
   var monthsAsList = transactionList.value
-      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY"))
+      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm"))
+      .sort((a, b) => a - b)
+      .map((value) => value.format("MMMM YYYY"))
 
   // Filter unique values
   var months = [...new Set(monthsAsList)]
-  var entries = []
 
   // Get unique category names
   var categoryList = transactionList.value.map((it) => it.categoryOverride)
@@ -315,9 +342,8 @@ function getMonthlySpendingByCategory() {
           .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
           .reduce((acc, value) => acc + value.amount, 0)
 
-      category.data.push({x: month, y: monthlyTotal})
+      category.data.push({x: moment(month, "MMMM YYYY"), y: monthlyTotal})
 
-      entries.push({x: month, y: monthlyTotal})
       monthlyCategoryList.value.push({
         category: category.label,
         month: month,
@@ -338,16 +364,9 @@ function sumColumn(items, field) {
 }
 
 function formatChartData() {
-  // Get month names
-  var monthsAsList = transactionList.value
-      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY"))
-
-  // Filter unique values
-  var months = [...new Set(monthsAsList)]
-
   // Populate chart data.
   categorySpendingPerMonthChartData.value = {
-    labels: months,
+    labels: [],
     datasets: getMonthlySpendingByCategory()
   }
 
@@ -434,7 +453,7 @@ function formatChartData() {
 
           <BPagination
               v-model="categoryCurrentPage"
-              :total-rows="monthlyCategoryList.length"
+              :total-rows="categoryListToTableList().length"
               :per-page="categoryPerPage"
               class="justify-content-center"
               first-number
@@ -471,7 +490,7 @@ function formatChartData() {
           </BTable>
           <BPagination
               v-model="categoryCurrentPage"
-              :total-rows="monthlyCategoryList.length"
+              :total-rows="categoryListToTableList().length"
               :per-page="categoryPerPage"
               class="justify-content-center"
               first-number
