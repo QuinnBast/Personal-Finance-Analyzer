@@ -167,7 +167,15 @@ function parseChequingTransaction(tokens) {
     }
   }
 
-  var category = lookupCategoryForVendor(vendorString, type)
+  var category = ""
+  var override = checkVendorOverride(vendorString, type)
+
+  if(override.category != null) {
+    category = override.category
+  }
+  if(override.vendorOverride != null) {
+    vendorString = override.category
+  }
 
   return {
     date: shortDate,
@@ -197,15 +205,22 @@ function parseCreditTransaction(tokens) {
       vendorString = vendorAndLocation
       category = "Bills"
     } else {
-      var vendor = vendorAndLocation.slice(0, 25).trim() // 25 Character vendor name.
+      vendorString = vendorAndLocation.slice(0, 25).trim() // 25 Character vendor name.
       var city = vendorAndLocation.slice(25, 38) // 13 char city name.
       var province = vendorAndLocation.slice(38, 40).trim() // 3 char province name at end
-      category = lookupCategoryForVendor(vendor)
+
+      var override = checkVendorOverride(vendorString, type)
+
+      if(override.category != null) {
+        category = override.category
+      }
+      if(override.vendorOverride != null) {
+        vendorString = override.category
+      }
 
       if(city.trim() !== "") {
         locationString = city + ", " + province
       }
-      vendorString = vendor
     }
   }
 
@@ -220,9 +235,12 @@ function parseCreditTransaction(tokens) {
   };
 }
 
-function lookupCategoryForVendor(vendorString, type = "") {
+function checkVendorOverride(vendorString, type = "") {
+  var override = {
+    category: null,
+    vendorOverride: null,
+  };
   // Lookup category...
-  var category = "Unknown"
   var foundFromList = categoryList.value.filter((it) => {
     if(it.regexMaybe !== null && it.regexMaybe !== "") {
       var regex = new RegExp(it.regexMaybe.toUpperCase())
@@ -233,15 +251,16 @@ function lookupCategoryForVendor(vendorString, type = "") {
   })
 
   if(foundFromList.length > 0) {
-    category = foundFromList[0].categoryName
+    override.category = foundFromList[0].categoryName
+    override.vendorOverride = foundFromList[0].vendor
   } else {
     if(type.includes("Bill Payment")) {
-      category = "Bills"
+      override.category = "Bills"
     } else if (type.includes("Payroll Deposit")) {
-      category = "Job"
+      override.category = "Job"
     }
   }
-  return category;
+  return override;
 }
 
 const newCategory = ref({})

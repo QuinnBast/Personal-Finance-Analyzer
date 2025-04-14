@@ -6,7 +6,7 @@
   <BNav pills class="p-4 custom-nav">
     <BNavItem href="/">Home</BNavItem>
     <BNavItem href="/transactions">Transactions</BNavItem>
-    <BNavItem href="/categories">Category List</BNavItem>
+    <BNavItem href="/categories">Vendor Mappings</BNavItem>
     <BNavItem href="/import">Import</BNavItem>
   </BNav>
 </template>

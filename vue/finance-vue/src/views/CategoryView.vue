@@ -69,7 +69,7 @@ const regexMatchFieldTypes = [
   }
 ]
 
-function getCategories() {
+function getVendorOverrides() {
   return axios.get(`http://localhost:9000/vendor-categories`).then((success) => {
     show?.({ props: {title: "Success", body: "Found " + success.data.vendorCategories.length + " categories.", variant: "success", pos: "bottom-right" }})
     categoryList.value = success.data.vendorCategories;
@@ -88,9 +88,9 @@ function deleteVendor(toDelete) {
   })
 }
 
-getCategories()
+getVendorOverrides()
 
-function createCategory() {
+function createVendorOverride() {
   if(newCategoryInput.regexMaybe === "" ) {
     newCategoryInput.regexMaybe = null
   }
@@ -160,7 +160,7 @@ function editVendor(categoryToUpdate) {
   }
 }
 
-function updateCategory() {
+function updateVendorOverride() {
     if(selectedCategory.regexMaybe === "" ) {
       selectedCategory.regexMaybe = null
     }
@@ -188,79 +188,86 @@ function updateCategory() {
 <template>
   <div class="m-4">
     <BContainer class="m-2">
-      <BButton @click="createCategoryModal = !createCategoryModal" size="lg" variant="success">Add Category</BButton>
+      <BButton @click="createCategoryModal = !createCategoryModal" size="lg" variant="success">Add Vendor Mapping</BButton>
     </BContainer>
 
     <BModal
         v-model="createCategoryModal"
         id="modal-center"
         centered
-        title="New Category"
+        title="Add Vendor Mapping"
         cancel-title="Cancel"
         cancel-variant="danger"
         ok-title="Create"
         ok-variant="success"
-        @ok="createCategory">
+        @ok="createVendorOverride">
       <BForm>
-        <BFormGroup
-            class="p-2 m-2"
-            id="input-vendor-regex"
-            label-for="vendorName"
-        >
-          <BInputGroup prepend="Vendor Name">
+        <BCard title="If Import matches:">
+          <BInputGroup prepend="Vendor Regex" class="p-2 m-2">
             <BFormInput
-                id="vendorName"
-                v-model="newCategoryInput.vendor"
+                id="regex"
+                v-model="newCategoryInput.regexMaybe"
                 type="text"
-                placeholder="Vendor"
+                placeholder="Regex"
                 required
+                @change="getExistingMatchingCategories"
             />
           </BInputGroup>
-        </BFormGroup>
+        </BCard>
+        <BCard title="Update it to:">
+          <BFormGroup
+              class="p-2 m-2"
+              id="input-vendor-regex"
+              label-for="vendorName"
+          >
+            <BInputGroup prepend="Vendor Name">
+              <BFormInput
+                  id="vendorName"
+                  v-model="newCategoryInput.vendor"
+                  type="text"
+                  placeholder="Vendor"
+                  required
+              />
+            </BInputGroup>
+            <BInputGroup prepend="Category" class="p-2 m-2">
+              <BFormInput
+                  id="category"
+                  v-model="newCategoryInput.categoryName"
+                  type="text"
+                  placeholder="Category"
+                  required
+              />
+            </BInputGroup>
+          </BFormGroup>
+        </BCard>
 
-        <BInputGroup prepend="Category" class="p-2 m-2">
-          <BFormInput
-              id="category"
-              v-model="newCategoryInput.categoryName"
-              type="text"
-              placeholder="Category"
-              required
-          />
-        </BInputGroup>
 
-        <BInputGroup prepend="Optional Regex" class="p-2 m-2">
-          <BFormInput
-              id="regex"
-              v-model="newCategoryInput.regexMaybe"
-              type="text"
-              placeholder="Regex"
-              required
-              @change="getExistingMatchingCategories"
-          />
-        </BInputGroup>
+        <BCard title="Regex Testing:">
 
-        <BInputGroup prepend="Regex Test String" class="p-2 m-2">
-          <BFormInput
-              id="regexTest"
-              v-model="regexTest"
-              type="text"
-              placeholder="Regex Test String"
-              required
-              :state="validateRegex"
-          />
+          <BInputGroup prepend="Regex Test String" class="p-2 m-2">
+            <BFormInput
+                id="regexTest"
+                v-model="regexTest"
+                type="text"
+                placeholder="Regex Test String"
+                required
+                :state="validateRegex"
+            />
 
-        </BInputGroup>
+          </BInputGroup>
 
-        <BTable
-            :key="matchingExistingCategories"
-            :items="matchingExistingCategories"
-            :fields="regexMatchFieldTypes"
-            emptyText="No existing categories match"
-        >
-          <template #cell(actions)="row">
-            <BButton size="sm" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
-          </template>
-        </BTable>
+          <BTable
+              :key="matchingExistingCategories"
+              :items="matchingExistingCategories"
+              :fields="regexMatchFieldTypes"
+              emptyText="No existing categories match"
+          >
+            <template #cell(actions)="row">
+              <BButton size="sm" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
+            </template>
+          </BTable>
+
+        </BCard>
       </BForm>
     </BModal>
 
@@ -273,7 +280,7 @@ function updateCategory() {
         cancel-variant="danger"
         ok-title="Update"
         ok-variant="primary"
-        @ok="updateCategory">
+        @ok="updateVendorOverride">
       <BForm>
         <BFormGroup
             class="p-2 m-2"
