@@ -9,6 +9,7 @@
 <script>
 import { Bar } from 'vue-chartjs'
 import { Chart as ChartJS, Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale } from 'chart.js'
+import { getCategoryColor } from "@/utils/categoryColors.js";
 import autocolors from 'chartjs-plugin-autocolors';
 
 ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale, autocolors)
@@ -37,7 +38,7 @@ export default {
       chartData: {
         labels: this.sortValueMap().map((it) => it.label),
         datasets: [ {
-          backgroundColor: ['rgb(215 125 126)', '#00D8FF', '#DD1B16', '#82d9d9', 'rgb(171 122 214)', 'rgb(216 195 132)', 'rgb(160 145 106)', 'rgb(129 218 153)', 'rgb(105 160 119)' ],
+          backgroundColor: this.sortValueMap().map((it) =>  getCategoryColor(it.label)),
           data: this.sortValueMap().map((it) => it.value),
         }]
       },

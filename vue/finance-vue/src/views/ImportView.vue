@@ -174,7 +174,7 @@ function parseChequingTransaction(tokens) {
     category = override.category
   }
   if(override.vendorOverride != null) {
-    vendorString = override.category
+    vendorString = override.vendorOverride
   }
 
   return {
@@ -215,7 +215,7 @@ function parseCreditTransaction(tokens) {
         category = override.category
       }
       if(override.vendorOverride != null) {
-        vendorString = override.category
+        vendorString = override.vendorOverride
       }
 
       if(city.trim() !== "") {

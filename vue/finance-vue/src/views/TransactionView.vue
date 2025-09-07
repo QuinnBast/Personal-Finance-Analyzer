@@ -18,6 +18,7 @@ import {
 import autocolors from 'chartjs-plugin-autocolors';
 import 'chartjs-adapter-moment';
 import {Bar, Line} from 'vue-chartjs'
+import { getCategoryColor, rgbToRgba } from "@/utils/categoryColors.js";
 import axios from 'axios';
 
 ChartJS.register(
@@ -153,6 +154,63 @@ const categoryChartData = {
   }
 }
 
+const stackedBarChartConfig = {
+  plugins: {
+    legend: {
+      labels: {
+        filter: (legendItem, chart) => {
+          const datasets = chart.datasets;
+
+          // Find the first dataset with this label
+          const currentLabel = legendItem.text;
+          const firstIndexWithLabel = datasets.findIndex(
+              d => d.label === currentLabel
+          );
+
+          // Only show legend item for the first matching dataset
+          return legendItem.datasetIndex === firstIndexWithLabel;
+        }
+      },
+      onClick: (e, legendItem, legend) => {
+        const chart = legend.chart;
+        const label = legendItem.text;
+
+        // Determine if the datasets with this label are currently visible or hidden
+        const someVisible = chart.data.datasets.some((dataset, i) => {
+          if (dataset.label === label) {
+            const meta = chart.getDatasetMeta(i);
+            return meta.hidden !== true; // true means hidden
+          }
+          return false;
+        });
+
+        // Toggle visibility for all datasets with this label
+        chart.data.datasets.forEach((dataset, i) => {
+          if (dataset.label === label) {
+            const meta = chart.getDatasetMeta(i);
+            meta.hidden = someVisible; // hide if any are visible, show if all hidden
+          }
+        });
+
+        chart.update();
+      }
+    },
+    title: {
+      display: true,
+      text: 'Chart.js Bar Chart - Stacked'
+    },
+  },
+  responsive: true,
+  scales: {
+    x: {
+      stacked: true,
+    },
+    y: {
+      stacked: true
+    }
+  }
+};
+
 const transactionChartData = {
   responsive: true,
   maintainAspectRatio: false,
@@ -224,6 +282,7 @@ const transactionChartData = {
 
 const categorySpendingPerMonthChartData = ref({})
 const allTransactionChartData = ref({})
+const stackedBarChartData = ref({})
 
 getTransactions()
 
@@ -326,8 +385,11 @@ function getMonthlySpendingByCategory() {
   var categories = [...new Set(categoryList)]
       .map((categoryName) => {
         return {
+          type: "line",
           label: categoryName,
           data: [],
+          backgroundColor: getCategoryColor(categoryName),
+          borderColor: getCategoryColor(categoryName),
         }
       })
 
@@ -355,6 +417,49 @@ function getMonthlySpendingByCategory() {
   return categories
 }
 
+function getMonthlySpendingByCategoryStacked() {
+  monthlyCategoryList.value = []
+  // Get months
+  var monthsAsList = transactionList.value
+      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm"))
+      .sort((a, b) => a - b)
+      .map((value) => value.format("MMMM YYYY"))
+
+  // Filter unique values
+  var months = [...new Set(monthsAsList)]
+
+  // Get unique category names
+  var categoryList = transactionList.value.map((it) => it.categoryOverride)
+  var categories = [...new Set(categoryList)]
+      .map((categoryName) => {
+        return {
+          label: categoryName,
+          data: [],
+          type: 'bar',
+          stack: 'combined',
+          backgroundColor: rgbToRgba(getCategoryColor(categoryName)),
+          borderColor: rgbToRgba(getCategoryColor(categoryName)),
+        }
+      })
+
+  categories.forEach((category) => {
+
+    var transactionsInCategory = transactionList.value
+        .filter((transaction) => transaction.categoryOverride === category.label)
+
+    // Also loop each month...
+    months.forEach((month) => {
+      var monthlyTotal = transactionsInCategory
+          .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
+          .reduce((acc, value) => acc + value.amount, 0)
+
+      category.data.push(monthlyTotal)
+    })
+  })
+
+  return categories
+}
+
 function filterTable(item, filter) {
   return item.month.startsWith(filter)
 }
@@ -363,11 +468,25 @@ function sumColumn(items, field) {
   return items.reduce((acc, item) => acc + item[field.key], 0)
 }
 
+function getMonths() {
+  const months = transactionList.value
+      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm"))
+      .sort((a, b) => a - b)
+      .map((value) => value.format("MMMM YYYY"))
+  // Remove duplicates
+  return [...new Set(months)]
+}
+
 function formatChartData() {
   // Populate chart data.
   categorySpendingPerMonthChartData.value = {
     labels: [],
     datasets: getMonthlySpendingByCategory()
+  }
+
+  stackedBarChartData.value = {
+    labels: getMonths(),
+    datasets: getMonthlySpendingByCategoryStacked().concat(getMonthlySpendingByCategory()),
   }
 
   allTransactionChartData.value = {
@@ -422,13 +541,17 @@ function formatChartData() {
         </div>
       </BCard>
 
-      <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
-        <div v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-          <Line :data="categorySpendingPerMonthChartData" :options="categoryChartData" style="width: 100%" />
-        </div>
-        <div v-else>
-          <h1>No data</h1>
-        </div>
+      <BCard class="text-center m-3" >
+        <h2>{{monthsAgo}} Month Total</h2>
+
+        <BRow>
+          <div v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+            <Line :options="stackedBarChartConfig" :data="stackedBarChartData" style="width: 100%" />
+          </div>
+          <div v-else>
+            <h1>No data</h1>
+          </div>
+        </BRow>
       </BCard>
 
       <BCard class="text-center m-3" >
