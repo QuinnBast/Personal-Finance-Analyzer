@@ -1,8 +1,7 @@
 <script setup>
 import {ref, reactive} from "vue";
-import moment from 'moment';
 import {BTable, useToast} from 'bootstrap-vue-next';
-import axios from 'axios';
+import api from "@/utils/apiProvider.js"
 
 
 const {show} = useToast()
@@ -42,7 +41,7 @@ function getTransactions() {
   transactionList.value = []
   if(isAnyQuery()) {
     transactionQuery.value = fixOptionalTransaction(transactionQuery.value)
-    return axios.post("http://localhost:9000/get-transactions", transactionQuery.value).then((success) => {
+    api.getTransactions(transactionQuery.value).then((success) => {
       show?.({
         props: {
           title: "Success",
@@ -121,7 +120,7 @@ function updateAllTransactions() {
   })
 
   var promises = ids.map((id) => {
-    return axios.post("http://localhost:9000/update-transaction", { id: id, update: transactionUpdateOptions.value }).then(
+    api.updateTransaction(id, transactionUpdateOptions.value).then(
         (success) => {}, (failure) => {
       show?.({
         props: {

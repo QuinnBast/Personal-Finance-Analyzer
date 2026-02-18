@@ -1,8 +1,8 @@
 <script setup>
 import {computed, ref} from "vue";
 import {BTable, useToast} from "bootstrap-vue-next";
-import axios from "axios";
 import moment from 'moment';
+import api from "@/utils/apiProvider.js"
 
 const {show} = useToast()
 const files = ref([])
@@ -88,8 +88,8 @@ function readFiles() {
 }
 
 function getCategories() {
-  return axios.get(`http://localhost:9000/vendor-categories`).then((success) => {
-    categoryList.value = success.data.vendorCategories;
+  return api.getVendorOverrides().then((vendorCategories) => {
+    categoryList.value = vendorCategories;
   })
 }
 
@@ -266,16 +266,19 @@ function checkVendorOverride(vendorString, type = "") {
 const newCategory = ref({})
 const createCategoryModal = ref(false)
 function addCategoryModal(item) {
-  newCategory.value = {
-    vendor: item.vendor,
-    category: item.category,
-    regexMaybe: ""
-  }
-  createCategoryModal.value = true
+  // Ignoring this for now...
+  // There's gotta be a better way that is more user friendly.
+
+  // newCategory.value = {
+  //   vendor: item.vendor,
+  //   category: item.category,
+  //   regexMaybe: ""
+  // }
+  // createCategoryModal.value = true
 }
 
 function createCategory() {
-  axios.post("http://localhost:9000/add-vendor", JSON.stringify(newCategory.value), {headers: {'Content-Type': 'application/json'}}).then(
+  api.addVendor(newCategory.value).then(
       (success) => {
         show?.({ props: {title: "Successfully created Category", body: "Created category (" + newCategory.value.vendor + " -> " + newCategory.value.category + ")", variant: "success", pos: "bottom-right" }})
 
@@ -302,7 +305,7 @@ function importTransactions() {
   var data = {
     transactions: transactionsToImport.value
   }
-  axios.post("http://localhost:9000/import-transactions", JSON.stringify(data), {headers: {'Content-Type': 'application/json'}}).then(
+  api.importTransactions(data).then(
       (success) => {
         show?.({ props: {title: "Successful import.", body: "Imported " + transactionsToImport.value.length + " transactions.", variant: "success", pos: "bottom-right" }})
         transactionsToImport.value = []
@@ -351,17 +354,67 @@ function getRegexp() {
 <template>
   <BContainer>
 
-    <BRow class="p-3">
-      <BCol>
-        <BDropdown :text="account">
-          <BDropdownItem @click="value => account = value.target.innerText">Chequing</BDropdownItem>
-          <BDropdownItem @click="value => account = value.target.innerText">Credit</BDropdownItem>
-        </BDropdown>
-      </BCol>
-      <BCol cols="9">
-        <BFormFile v-model="files" multiple accept="text/csv" @update:modelValue="readFiles"/>
-      </BCol>
-    </BRow>
+    <BCard class="p-3">
+      <h2>Import Bank Statement</h2>
+
+      <BButton
+          v-b-toggle.collapse-1
+          variant="primary"
+      >Need Help?</BButton
+      >
+
+      <BCollapse id="collapse-1">
+        <BCard class="mt-4">
+          <h1>How to import bank statement</h1>
+
+          <p>To use this applicaiton, currently you must be using Scotiabank.</p>
+
+          <ul>
+            <li>Login to Scotiabank</li>
+            <li>Click to view one of your accounts</li>
+            <li>Filter to a single month</li>
+            <BAlert :model-value="true" variant="info">
+              Ensure that you do not have "Current statement period" selected.
+              Select a month.
+
+              DO NOT select the current month, as the month is not over, and the application does not filter out duplicate transactions.
+              Thus, you should only import previous months.
+            </BAlert>
+            <li>Download as a CSV</li>
+            <li>Select your account type below (Credit or Chequing)</li>
+            <li>Click "Choose" and import the downloaded CSV here!</li>
+          </ul>
+
+          Once imported, you will be able to see a list of all of your transactions.
+          However, many of them will likely have red "Unknown" categories.
+          Give these transactions a category!
+
+          <BAlert :model-value="true" variant="info">
+            This will get easier as you import more transactions.
+            The app will remember which categories match which vendors so on future imports, they will get automatically assigned.
+          </BAlert>
+
+          Once you have categorized all of your transactions, click the "Import" button.
+
+          Repeat this for each month that you want to import.
+          I recommend importing as much data as possible to get a wholistic view of your finances.
+
+          Once complete, return to the home page and select the time-range that will include your transactions.
+        </BCard>
+      </BCollapse>
+
+      <BRow class="p-3">
+        <BCol>
+          <BDropdown :text="account">
+            <BDropdownItem @click="value => account = value.target.innerText">Chequing</BDropdownItem>
+            <BDropdownItem @click="value => account = value.target.innerText">Credit</BDropdownItem>
+          </BDropdown>
+        </BCol>
+        <BCol cols="9">
+          <BFormFile v-model="files" multiple accept="text/csv" @update:modelValue="readFiles"/>
+        </BCol>
+      </BRow>
+    </BCard>
 
     <BModal
         v-model="createCategoryModal"

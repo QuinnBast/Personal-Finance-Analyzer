@@ -19,7 +19,7 @@ import autocolors from 'chartjs-plugin-autocolors';
 import 'chartjs-adapter-moment';
 import {Bar, Line} from 'vue-chartjs'
 import { getCategoryColor, rgbToRgba } from "@/utils/categoryColors.js";
-import axios from 'axios';
+import api from "@/utils/apiProvider.js"
 
 ChartJS.register(
     CategoryScale,
@@ -85,9 +85,9 @@ function categoryListToTableList() {
 }
 
 function getTransactions() {
-  return axios.get(`http://localhost:9000/transactions?monthsAgo=` + monthsAgo.value).then((success) => {
-    show?.({ props: {title: "Success", body: "Found " + success.data.transactions.length + " transactions within the past " + monthsAgo.value + " months.", variant: "success", pos: "bottom-right" }})
-    transactionList.value = success.data.transactions;
+  return api.getTransactionsSinceMonthsAgo(monthsAgo.value).then((transactions) => {
+    show?.({ props: {title: "Success", body: "Found " + transactions.length + " transactions within the past " + monthsAgo.value + " months.", variant: "success", pos: "bottom-right" }})
+    transactionList.value = transactions;
     formatChartData()
   }, (failure) => {
     show?.({ props: {title: "Failed to get transactions", body: failure.message, variant: "danger", pos: "bottom-right" }})
@@ -290,18 +290,18 @@ function sumTransactions(income = true, expenses = true, ignoreInvestments = fal
   var total = 0
   transactionList.value.forEach((transaction) => {
     // Corrections should only apply to expenses to reduce them.
-    if(transaction.purchaseType === "Correction") {
+    if(transaction.purchaseType.toLowerCase() === "correction") {
       if(expenses) {
-        total += transaction.amount
+        total += Number(transaction.amount)
       }
     } else {
-      if ((expenses && transaction.amount < 0) || (income && transaction.amount > 0)) {
+      if ((expenses && Number(transaction.amount) < 0) || (income && Number(transaction.amount) > 0)) {
         if (ignoreInvestments) {
-          if (transaction.categoryOverride !== "Investment") {
-            total += transaction.amount
+          if (transaction.categoryOverride.toLowerCase() !== "investment") {
+            total += Number(transaction.amount)
           }
         } else {
-          total += transaction.amount
+          total += Number(transaction.amount)
         }
       }
     }
@@ -320,20 +320,20 @@ function sumTransactionsByField(field, income = true, expenses = true) {
     }
 
     if (categoryTotals[categoryName] === undefined) {
-      categoryTotals[categoryName] = transaction.amount;
+      categoryTotals[categoryName] = Number(transaction.amount);
     } else {
-      categoryTotals[categoryName] += transaction.amount;
+      categoryTotals[categoryName] += Number(transaction.amount);
     }
   }
 
-  var shouldCountAsExpense = (transaction) => expenses && transaction.amount < 0
-  var shouldCountAsIncome = (transaction) => income && transaction.amount > 0
+  var shouldCountAsExpense = (transaction) => expenses && Number(transaction.amount) < 0
+  var shouldCountAsIncome = (transaction) => income && Number(transaction.amount) > 0
 
   transactionList.value.forEach((transaction) => {
     // If the transaction is a Correction we need to:
     // Consider it in expenses - even if we made money from it.
     // But not consider it in income.
-    if(transaction.purchaseType === "Correction") {
+    if(transaction.purchaseType.toLowerCase() === "correction") {
       if(expenses) {
         addToCategoryTotal(transaction)
       }
@@ -352,10 +352,10 @@ function sumTransactionsByField(field, income = true, expenses = true) {
 function getCumulativeTransactionHistory() {
   var currentBalance = 0
   var data = transactionList.value
-      .sort((a, b) => b.amount - a.amount)
+      .sort((a, b) => Number(b.amount) - Number(a.amount))
       .sort((a, b) => moment(a.date, "YYYY-MM-DDTHH:mm") - moment(b.date, "YYYY-MM-DDTHH:mm"))
       .map((transaction) => {
-        currentBalance = currentBalance + transaction.amount
+        currentBalance = currentBalance + Number(transaction.amount)
         return {
           x: moment(transaction.date, "YYYY-MM-DDTHH:mm"),
           y: currentBalance,
@@ -402,7 +402,7 @@ function getMonthlySpendingByCategory() {
     months.forEach((month) => {
       var monthlyTotal = transactionsInCategory
           .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
-          .reduce((acc, value) => acc + value.amount, 0)
+          .reduce((acc, value) => acc + Number(value.amount), 0)
 
       category.data.push({x: moment(month, "MMMM YYYY"), y: monthlyTotal})
 
@@ -451,7 +451,7 @@ function getMonthlySpendingByCategoryStacked() {
     months.forEach((month) => {
       var monthlyTotal = transactionsInCategory
           .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
-          .reduce((acc, value) => acc + value.amount, 0)
+          .reduce((acc, value) => acc + Number(value.amount), 0)
 
       category.data.push(monthlyTotal)
     })
@@ -512,177 +512,201 @@ function formatChartData() {
         <BDropdownItem @click="changeTimeRange(900)">All</BDropdownItem>
       </BDropdown>
 
-      <BCard class="text-center m-3" :key="sumTransactions(true, false)">
-        <h2>{{monthsAgo}} Month Summary</h2>
-        <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-          <h3><b>Total:</b> ${{ sumTransactions() }}</h3>
-          <h3><b>Total (w/o Investments):</b> ${{ sumTransactions(true, true, true) }}</h3>
-          <BRow style="height: 400px">
-            <BCol>
-              <PieChart :valueMap="sumTransactionsByField('categoryOverride', true, false)" :title="'Income: $' + sumTransactions(true, false)"/>
-            </BCol>
-            <BCol>
-              <PieChart :valueMap="sumTransactionsByField('categoryOverride', false)" :title="'Expenses: $' + sumTransactions(false, true)"/>
-            </BCol>
-          </BRow>
-        </BContainer>
-        <BContainer v-else>
-          <h1>No data</h1>
-        </BContainer>
-      </BCard>
+      <div v-if="transactionList.length !== 0" class="m-3">
+        <BCard class="text-center m-3" :key="sumTransactions(true, false)">
+          <h2>{{monthsAgo}} Month Summary</h2>
+          <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+            <h3><b>Total:</b> ${{ sumTransactions() }}</h3>
+            <h3><b>Total (w/o Investments):</b> ${{ sumTransactions(true, true, true) }}</h3>
+            <BRow style="height: 400px">
+              <BCol>
+                <PieChart :valueMap="sumTransactionsByField('categoryOverride', true, false)" :title="'Income: $' + sumTransactions(true, false)"/>
+              </BCol>
+              <BCol>
+                <PieChart :valueMap="sumTransactionsByField('categoryOverride', false)" :title="'Expenses: $' + sumTransactions(false, true)"/>
+              </BCol>
+            </BRow>
+          </BContainer>
+          <BContainer v-else>
+            <h1>No data</h1>
+          </BContainer>
+        </BCard>
 
-      <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
-        <h2>{{monthsAgo}} Month Total</h2>
-        <div v-if="allTransactionChartData.datasets?.length !== undefined && allTransactionChartData.datasets.length > 0">
-          <Line :data="allTransactionChartData" :options="transactionChartData" style="width: 100%" />
-        </div>
-        <div v-else>
-          <h1>No data</h1>
-        </div>
-      </BCard>
-
-      <BCard class="text-center m-3" >
-        <h2>{{monthsAgo}} Month Total</h2>
-
-        <BRow>
-          <div v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-            <Line :options="stackedBarChartConfig" :data="stackedBarChartData" style="width: 100%" />
+        <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
+          <h2>{{monthsAgo}} Month Total</h2>
+          <div v-if="allTransactionChartData.datasets?.length !== undefined && allTransactionChartData.datasets.length > 0">
+            <Line :data="allTransactionChartData" :options="transactionChartData" style="width: 100%" />
           </div>
           <div v-else>
             <h1>No data</h1>
           </div>
-        </BRow>
-      </BCard>
+        </BCard>
 
-      <BCard class="text-center m-3" >
-        <h2>Category Totals</h2>
+        <BCard class="text-center m-3" >
+          <h2>{{monthsAgo}} Month Total</h2>
 
-        <BFormGroup
-            class="p-2 m-2"
-            id="input-vendor-regex"
-            label-for="filterText"
-        >
-          <BInputGroup prepend="Month Filter">
-            <BFormInput
-                id="filterText"
-                v-model="filterText"
-                type="text"
-                placeholder="Month Filter"
-            />
-          </BInputGroup>
-        </BFormGroup>
-
-        <BContainer v-if="categoryListToTableList().length !== undefined && categoryListToTableList().length > 0">
-
-          <BPagination
-              v-model="categoryCurrentPage"
-              :total-rows="categoryListToTableList().length"
-              :per-page="categoryPerPage"
-              class="justify-content-center"
-              first-number
-              last-number
-              :limit="5"
-          />
-          <BTable
-              :key="listSize"
-              :sort-by="[{key: 'date', order: 'desc'}]"
-              :items="categoryListToTableList()"
-              :per-page="categoryPerPage"
-              :current-page="categoryCurrentPage"
-              :filterable="['month']"
-              :filter="filterText"
-              :filter-function="filterTable"
-              emptyText="No data"
-              striped
-              small
-              bordered
-              responsive
-          >
-            <template #custom-foot="ctx">
-              <BTr>
-                <BTh v-for="field in ctx.fields">
-                  <p v-if="field.key === 'month'">
-                    TOTAL:
-                  </p>
-                  <p v-else>
-                    {{ Math.round(sumColumn(ctx.items, field) * 100) / 100 }}
-                  </p>
-                </BTh>
-              </BTr>
-            </template>
-          </BTable>
-          <BPagination
-              v-model="categoryCurrentPage"
-              :total-rows="categoryListToTableList().length"
-              :per-page="categoryPerPage"
-              class="justify-content-center"
-              first-number
-              last-number
-              :limit="5"
-          />
-        </BContainer>
-        <BContainer v-else>
-          <h1>No data</h1>
-        </BContainer>
-      </BCard>
-
-      <BCard class="text-center m-3" :key="sumTransactions(true, false)">
-        <h2>Insights</h2>
-        <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-          <BRow style="height: 400px">
-            <BCol>
-              <PieChart :valueMap="sumTransactionsByField('location', false)" title="Location"/>
-            </BCol>
-            <BCol>
-              <PieChart :valueMap="sumTransactionsByField('account', false)" title="Account"/>
-            </BCol>
-          </BRow>
           <BRow>
-            <BarChart :valueMap="sumTransactionsByField('vendor', false)" title="Spending By Vendor"/>
+            <div v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+              <Line :options="stackedBarChartConfig" :data="stackedBarChartData" style="width: 100%" />
+            </div>
+            <div v-else>
+              <h1>No data</h1>
+            </div>
           </BRow>
+        </BCard>
 
-        </BContainer>
-        <BContainer v-else>
-          <h1>No data</h1>
-        </BContainer>
-      </BCard>
+        <BCard class="text-center m-3" >
+          <h2>Category Totals</h2>
 
-      <BCard class="text-center m-3" >
-        <h2>Transaction History</h2>
-        <BContainer v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+          <BFormGroup
+              class="p-2 m-2"
+              id="input-vendor-regex"
+              label-for="filterText"
+          >
+            <BInputGroup prepend="Month Filter">
+              <BFormInput
+                  id="filterText"
+                  v-model="filterText"
+                  type="text"
+                  placeholder="Month Filter"
+              />
+            </BInputGroup>
+          </BFormGroup>
 
-          <BPagination
-              v-model="currentPage"
-              :total-rows="transactionList.length"
-              :per-page="perPage"
-              class="justify-content-center"
-              first-number
-              last-number
-              :limit="5"
-          />
-          <BTable
-              :key="listSize"
-              :sort-by="[{key: 'date', order: 'desc'}]"
-              :items="transactionList"
-              :fields="sortFields"
-              :per-page="perPage"
-              :current-page="currentPage"
-              emptyText="No data"
-          />
-          <BPagination
-              v-model="currentPage"
-              :total-rows="transactionList.length"
-              :per-page="perPage"
-              class="justify-content-center"
-              first-number
-              last-number
-              :limit="5"
-          />
-        </BContainer>
-        <BContainer v-else>
-          <h1>No data</h1>
-        </BContainer>
-      </BCard>
+          <BContainer v-if="categoryListToTableList().length !== undefined && categoryListToTableList().length > 0">
+
+            <BPagination
+                v-model="categoryCurrentPage"
+                :total-rows="categoryListToTableList().length"
+                :per-page="categoryPerPage"
+                class="justify-content-center"
+                first-number
+                last-number
+                :limit="5"
+            />
+            <BTable
+                :key="listSize"
+                :sort-by="[{key: 'date', order: 'desc'}]"
+                :items="categoryListToTableList()"
+                :per-page="categoryPerPage"
+                :current-page="categoryCurrentPage"
+                :filterable="['month']"
+                :filter="filterText"
+                :filter-function="filterTable"
+                emptyText="No data"
+                striped
+                small
+                bordered
+                responsive
+            >
+              <template #custom-foot="ctx">
+                <BTr>
+                  <BTh v-for="field in ctx.fields">
+                    <p v-if="field.key === 'month'">
+                      TOTAL:
+                    </p>
+                    <p v-else>
+                      {{ Math.round(sumColumn(ctx.items, field) * 100) / 100 }}
+                    </p>
+                  </BTh>
+                </BTr>
+              </template>
+            </BTable>
+            <BPagination
+                v-model="categoryCurrentPage"
+                :total-rows="categoryListToTableList().length"
+                :per-page="categoryPerPage"
+                class="justify-content-center"
+                first-number
+                last-number
+                :limit="5"
+            />
+          </BContainer>
+          <BContainer v-else>
+            <h1>No data</h1>
+          </BContainer>
+        </BCard>
+
+        <BCard class="text-center m-3" :key="sumTransactions(true, false)">
+          <h2>Insights</h2>
+          <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+            <BRow style="height: 400px">
+              <BCol>
+                <PieChart :valueMap="sumTransactionsByField('location', false)" title="Location"/>
+              </BCol>
+              <BCol>
+                <PieChart :valueMap="sumTransactionsByField('account', false)" title="Account"/>
+              </BCol>
+            </BRow>
+            <BRow>
+              <BarChart :valueMap="sumTransactionsByField('vendor', false)" title="Spending By Vendor"/>
+            </BRow>
+
+          </BContainer>
+          <BContainer v-else>
+            <h1>No data</h1>
+          </BContainer>
+        </BCard>
+
+        <BCard class="text-center m-3" >
+          <h2>Transaction History</h2>
+          <BContainer v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
+
+            <BPagination
+                v-model="currentPage"
+                :total-rows="transactionList.length"
+                :per-page="perPage"
+                class="justify-content-center"
+                first-number
+                last-number
+                :limit="5"
+            />
+            <BTable
+                :key="listSize"
+                :sort-by="[{key: 'date', order: 'desc'}]"
+                :items="transactionList"
+                :fields="sortFields"
+                :per-page="perPage"
+                :current-page="currentPage"
+                emptyText="No data"
+            />
+            <BPagination
+                v-model="currentPage"
+                :total-rows="transactionList.length"
+                :per-page="perPage"
+                class="justify-content-center"
+                first-number
+                last-number
+                :limit="5"
+            />
+          </BContainer>
+          <BContainer v-else>
+            <h1>No data</h1>
+          </BContainer>
+        </BCard>
+      </div>
+      <div v-else>
+        <BCard>
+          <BAlert :model-value="true" variant="info">
+            <h1>First time visitor?</h1>
+            <h3>Welcome!</h3>
+
+            <p>This is a personal finance tracker that allows you to track your spending habits and view insights into your finances.</p>
+
+            <p>Start by clicking the "Import" tab and importing your transactions.</p>
+            <p>All data is stored locally within your browser.</p>
+          </BAlert>
+
+          <BAlert :model-value="true" variant="warning">
+            <h1>Return user?</h1>
+
+            No transactions available in the last {{monthsAgo}} months.
+            Please select a larger time-range.
+          </BAlert>
+        </BCard>
+      </div>
+
+
     </div>
   </main>
 </template>

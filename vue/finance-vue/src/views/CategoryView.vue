@@ -2,6 +2,7 @@
 import {computed, ref} from "vue";
 import {BTable, useToast} from "bootstrap-vue-next";
 import axios from "axios";
+import api from "@/utils/apiProvider.js";
 
 const categoryList = ref([])
 const matchingExistingCategories = ref([])
@@ -70,16 +71,17 @@ const regexMatchFieldTypes = [
 ]
 
 function getVendorOverrides() {
-  return axios.get(`http://localhost:9000/vendor-categories`).then((success) => {
-    show?.({ props: {title: "Success", body: "Found " + success.data.vendorCategories.length + " categories.", variant: "success", pos: "bottom-right" }})
-    categoryList.value = success.data.vendorCategories;
+  return api.getVendorOverrides().then((vendorCategories) => {
+    show?.({ props: {title: "Success", body: "Found " + vendorCategories.length + " categories.", variant: "success", pos: "bottom-right" }})
+    categoryList.value = vendorCategories;
   }, (failure) => {
     show?.({ props: {title: "Failed to get categories", body: failure.message, variant: "danger", pos: "bottom-right" }})
   })
 }
 
 function deleteVendor(toDelete) {
-  axios.delete("http://localhost:9000/delete-vendor?id=" + toDelete.id).then((success) => {
+  api.deleteVendor(toDelete.id).then(
+      (success) => {
     show?.({ props: {title: "Success", body: "Deleted category: " + toDelete.vendor, variant: "success", pos: "bottom-right" }})
     categoryList.value = categoryList.value.filter((it) => it !== toDelete)
     matchingExistingCategories.value = matchingExistingCategories.value.filter((it) => it !== toDelete)
@@ -94,7 +96,7 @@ function createVendorOverride() {
   if(newCategoryInput.regexMaybe === "" ) {
     newCategoryInput.regexMaybe = null
   }
-  axios.post("http://localhost:9000/add-vendor", JSON.stringify(newCategoryInput), {headers: {'Content-Type': 'application/json'}}).then(
+  api.insertCategory(newCategoryInput).then(
       (success) => {
         categoryList.value.push({
           vendor: newCategoryInput.vendor,
@@ -165,7 +167,7 @@ function updateVendorOverride() {
       selectedCategory.regexMaybe = null
     }
 
-    axios.post("http://localhost:9000/update-category", JSON.stringify(selectedCategory), {headers: {'Content-Type': 'application/json'}}).then(
+    api.updateCategory(selectedCategory).then(
         (success) => {
           // Update list in place.
           const indexToReplace = categoryList.value.findIndex((it) => it.id === selectedCategory.id)
@@ -187,6 +189,13 @@ function updateVendorOverride() {
 
 <template>
   <div class="m-4">
+    <BCard class="mt-4">
+      <h1>Vendor Categories</h1>
+
+      <p>This is a list of your known vendors and their category.</p>
+      <p>Any future imported transactions with the same vendor name will get automatically assigned to the same cateogry</p>
+    </BCard>
+
     <BContainer class="m-2">
       <BButton @click="createCategoryModal = !createCategoryModal" size="lg" variant="success">Add Vendor Mapping</BButton>
     </BContainer>
