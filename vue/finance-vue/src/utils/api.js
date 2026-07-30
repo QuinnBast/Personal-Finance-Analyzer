@@ -27,14 +27,18 @@ class ServerFinanceProvider extends FinanceProvider {
         );
     }
 
+    /**
+     * Imports transactions only.
+     *
+     * This used to also POST /add-vendor once per transaction, which is how a
+     * single 140-row month created 140 vendor rules - 527 of the 1,000 rules in
+     * the database can never fire because of it. Creating rules is now an
+     * explicit, de-duplicated step the import page performs (and shows) itself.
+     */
     async importTransactions(transactionsToImport) {
-        const data = {
-            transactions: transactionsToImport
-        };
-
         return axios.post(
             `${this.baseUrl}/import-transactions`,
-            JSON.stringify(data),
+            JSON.stringify(transactionsToImport),
             {headers: {'Content-Type': 'application/json'}}
         );
     }
@@ -50,7 +54,7 @@ class ServerFinanceProvider extends FinanceProvider {
 
     async getVendorOverrides() {
         const response = await axios.get(`${this.baseUrl}/vendor-categories`);
-        return response.data;
+        return response.data.vendorCategories;
     }
 
     async deleteVendor(vendorIdToDelete) {
@@ -85,6 +89,30 @@ class ServerFinanceProvider extends FinanceProvider {
         return axios.post(`${this.baseUrl}/update-category`, JSON.stringify(categoryData), {
             headers: {'Content-Type': 'application/json'}
         });
+    }
+
+    fixOptionalTransaction(optionalTransaction) {
+        if(optionalTransaction.vendor === "") {
+            optionalTransaction.vendor = null
+        }
+        if(optionalTransaction.amount === "") {
+            optionalTransaction.amount = null
+        }
+        if(optionalTransaction.account === "") {
+            optionalTransaction.account = null
+        }
+        if(optionalTransaction.category === "") {
+            optionalTransaction.category = null
+        }
+
+        if(optionalTransaction.type === "") {
+            optionalTransaction.type = null
+        }
+
+        if(optionalTransaction.location === "") {
+            optionalTransaction.location = null
+        }
+        return optionalTransaction
     }
 }
 

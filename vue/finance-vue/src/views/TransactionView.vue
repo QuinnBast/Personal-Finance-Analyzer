@@ -1,712 +1,418 @@
 <script setup>
-import BarChart from "@/components/BarChart.vue";
-import {ref, reactive} from "vue";
-import moment from 'moment';
-import {BTable, useToast} from 'bootstrap-vue-next';
-import zoomPlugin from 'chartjs-plugin-zoom';
+/**
+ * Dashboard.
+ *
+ * Every aggregation is a `computed` over one prepared row set, so changing the
+ * range, interval or account re-derives once instead of on every re-render.
+ *
+ * Data is imported one whole month at a time, so every month here is complete:
+ * nothing projects, nothing is "so far", and the newest month counts toward the
+ * average and median like any other.
+ */
+import { computed, ref, watch } from 'vue'
+import { useToast } from 'bootstrap-vue-next'
+import api from '@/utils/apiProvider.js'
 import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Title,
-  Tooltip,
-  Legend,
-  TimeScale
-} from 'chart.js'
-import autocolors from 'chartjs-plugin-autocolors';
-import 'chartjs-adapter-moment';
-import {Bar, Line} from 'vue-chartjs'
-import { getCategoryColor, rgbToRgba } from "@/utils/categoryColors.js";
-import api from "@/utils/apiProvider.js"
+  INTERVALS,
+  availableMonths,
+  dataQuality,
+  prepare,
+  recurringCharges,
+  summary,
+} from '@/utils/analytics.js'
+import { dateLabel, money, percent } from '@/utils/format.js'
+import StatTile from '@/components/StatTile.vue'
+import TransactionTable from '@/components/TransactionTable.vue'
+import MonthDetail from '@/components/MonthDetail.vue'
+import SavingsIdeas from '@/components/SavingsIdeas.vue'
+import RecurringTable from '@/components/RecurringTable.vue'
+import CashflowChart from '@/components/charts/CashflowChart.vue'
+import SavingsRateChart from '@/components/charts/SavingsRateChart.vue'
+import CategoryStackChart from '@/components/charts/CategoryStackChart.vue'
+import CategoryShareChart from '@/components/charts/CategoryShareChart.vue'
+import CategoryHeatmap from '@/components/charts/CategoryHeatmap.vue'
+import TopVendorsChart from '@/components/charts/TopVendorsChart.vue'
+import WeekdayProfileChart from '@/components/charts/WeekdayProfileChart.vue'
+import TicketSizeChart from '@/components/charts/TicketSizeChart.vue'
+import BalanceChart from '@/components/charts/BalanceChart.vue'
 
-ChartJS.register(
-    CategoryScale,
-    LinearScale,
-    PointElement,
-    LineElement,
-    Title,
-    Tooltip,
-    Legend,
-    TimeScale,
-    autocolors,
-    zoomPlugin
-)
+const { show } = useToast()
 
-const shouldShow = ref(false)
-const {show} = useToast()
-
-const sortFields = [
-  {key: 'date', sortable: true},
-  {key: 'vendor', sortable: true},
-  {key: 'account', sortable: true},
-  {key: 'location', sortable: true},
-  {key: 'purchaseType', sortable: true},
-  {key: 'categoryOverride', sortable: true},
-  {key: 'amount', sortable: true},
+const ALL_MONTHS = 900
+const RANGES = [
+  { label: '6M', months: 6 },
+  { label: '1Y', months: 12 },
+  { label: '2Y', months: 24 },
+  { label: '5Y', months: 60 },
+  { label: 'All', months: ALL_MONTHS },
 ]
 
-const transactionList = reactive(ref([]));
-const perPage = 20;
-const currentPage = ref(1)
-const monthsAgo = ref(2)
+const rawTransactions = ref([])
+const monthsAgo = ref(12)
+const interval = ref('month')
+const accountFilter = ref('all')
+const focusMonth = ref('')
+const loading = ref(false)
+const loaded = ref(false)
 
+// ---- data -----------------------------------------------------------------
+/**
+ * The API cuts at "today minus N months", which lands mid-month. We ask for one
+ * extra month and trim to a month boundary so every bucket is a whole month.
+ */
+const rangeStart = computed(() => {
+  if (monthsAgo.value >= ALL_MONTHS) return null
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  d.setDate(1)
+  d.setMonth(d.getMonth() - (monthsAgo.value - 1))
+  return d.getTime()
+})
 
-const monthlyCategoryList = reactive(ref([]));
-const categoryPerPage = 20;
-const categoryCurrentPage = ref(1)
+const allRows = computed(() => {
+  const prepared = prepare(rawTransactions.value)
+  const start = rangeStart.value
+  return start == null ? prepared : prepared.filter((r) => r.ts >= start)
+})
 
-const filterText = ref("")
+const accounts = computed(() => [...new Set(allRows.value.map((r) => r.account))].sort())
+const rows = computed(() =>
+  accountFilter.value === 'all'
+    ? allRows.value
+    : allRows.value.filter((r) => r.account === accountFilter.value),
+)
 
-function categoryListToTableList() {
-  // Have: [{month, monthlyTotal, Category}]
-  // Need: [{month, c1Total, c2Total, c3Total, ....}]
+const stats = computed(() => summary(rows.value))
+const quality = computed(() => dataQuality(rows.value))
+const months = computed(() => availableMonths(rows.value))
+const monthlySpendTrend = computed(() => stats.value.monthly.map((m) => m.spend))
+const monthlyIncomeTrend = computed(() => stats.value.monthly.map((m) => m.income))
 
-  var months = monthlyCategoryList.value
-      .map((it) => it.month)
-  var uniqueMonths = [...new Set(months)]
+const activeRecurringMonthly = computed(() =>
+  recurringCharges(rows.value)
+    .filter((r) => r.active)
+    .reduce((a, r) => a + r.monthlyEquivalent, 0),
+)
 
-  var rows = uniqueMonths.map((month) => {
-    var monthlyTotals = monthlyCategoryList.value.filter((it) => it.month === month)
+const rangeLabel = computed(() => {
+  const m = months.value
+  if (!m.length) return ''
+  return m.length === 1 ? monthText(m[0]) : `${monthText(m[m.length - 1])} – ${monthText(m[0])}`
+})
 
-    var monthlyTotal = monthlyTotals.reduce((acc, value) => acc + value.value, 0)
-
-    // Need to transform each "category" into a key, and then sum it.
-    return monthlyTotals.reduce((acc, value) => {
-      acc[value.category] = Math.round(value.value * 100) / 100
-      return acc
-    }, { month: month, total: Math.round(monthlyTotal * 100) / 100 })
-  })
-
-  rows.sort((a, b) => moment(a.month, "MMMM YYYY") - moment(b.month, "MMMM YYYY"))
-
-  return rows
+function monthText(key) {
+  const [y, mo] = String(key).split('-')
+  return `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(mo) - 1]} ${y}`
 }
 
+// Default the month selector to the newest month, and keep it valid.
+watch(
+  months,
+  (list) => {
+    if (!list.length) focusMonth.value = ''
+    else if (!list.includes(focusMonth.value)) focusMonth.value = list[0]
+  },
+  { immediate: true },
+)
+
+// ---- transaction table -----------------------------------------------------
+// prepare() returns oldest-first; the history reads newest-first.
+const recentFirst = computed(() => rows.value.slice().reverse())
+
+// ---- fetching --------------------------------------------------------------
 function getTransactions() {
-  return api.getTransactionsSinceMonthsAgo(monthsAgo.value).then((transactions) => {
-    show?.({ props: {title: "Success", body: "Found " + transactions.length + " transactions within the past " + monthsAgo.value + " months.", variant: "success", pos: "bottom-right" }})
-    transactionList.value = transactions;
-    formatChartData()
-  }, (failure) => {
-    show?.({ props: {title: "Failed to get transactions", body: failure.message, variant: "danger", pos: "bottom-right" }})
-  })
+  loading.value = true
+  // One month of slack so trimming to a month boundary never starves the range.
+  const request = monthsAgo.value >= ALL_MONTHS ? monthsAgo.value : monthsAgo.value + 1
+  return api.getTransactionsSinceMonthsAgo(request).then(
+    (transactions) => {
+      rawTransactions.value = transactions ?? []
+      loading.value = false
+      loaded.value = true
+    },
+    (failure) => {
+      loading.value = false
+      loaded.value = true
+      show?.({
+        props: {
+          title: 'Failed to get transactions',
+          body: failure.message,
+          variant: 'danger',
+          pos: 'bottom-right',
+        },
+      })
+    },
+  )
 }
 
 function changeTimeRange(newMonthsAgo) {
-  monthsAgo.value = newMonthsAgo;
+  if (monthsAgo.value === newMonthsAgo) return
+  monthsAgo.value = newMonthsAgo
   getTransactions()
 }
 
-const categoryChartData = {
-  responsive: true,
-  maintainAspectRatio: false,
-  scales: {
-    x: {
-      type: 'time',
-    },
-    y: {
-      grid: {
-        lineWidth: function(context) {
-          if(context.tick.value === 0) {
-            return 3
-          }
-          return 1
-        },
-        color: function(context) {
-          if(context.tick.value === 0) {
-            return "#000000"
-          }
-          return "#717171"
-        }
-      }
-    }
-  },
-  plugins: {
-    autocolors,
-    title: {
-      display: true,
-      fullSize: true,
-      font: {
-        size: 36
-      },
-      text: "Monthly Sum",
-    },
-    zoom: {
-      pan: {
-        enabled: true,
-        mode: 'xy',
-      },
-      limits: {
-        // axis limits
-      },
-      zoom: {
-        wheel: {
-          enabled: true,
-        },
-        pinch: {
-          enabled: true
-        },
-        mode: 'xy',
-      }
-    }
-  }
-}
-
-const stackedBarChartConfig = {
-  plugins: {
-    legend: {
-      labels: {
-        filter: (legendItem, chart) => {
-          const datasets = chart.datasets;
-
-          // Find the first dataset with this label
-          const currentLabel = legendItem.text;
-          const firstIndexWithLabel = datasets.findIndex(
-              d => d.label === currentLabel
-          );
-
-          // Only show legend item for the first matching dataset
-          return legendItem.datasetIndex === firstIndexWithLabel;
-        }
-      },
-      onClick: (e, legendItem, legend) => {
-        const chart = legend.chart;
-        const label = legendItem.text;
-
-        // Determine if the datasets with this label are currently visible or hidden
-        const someVisible = chart.data.datasets.some((dataset, i) => {
-          if (dataset.label === label) {
-            const meta = chart.getDatasetMeta(i);
-            return meta.hidden !== true; // true means hidden
-          }
-          return false;
-        });
-
-        // Toggle visibility for all datasets with this label
-        chart.data.datasets.forEach((dataset, i) => {
-          if (dataset.label === label) {
-            const meta = chart.getDatasetMeta(i);
-            meta.hidden = someVisible; // hide if any are visible, show if all hidden
-          }
-        });
-
-        chart.update();
-      }
-    },
-    title: {
-      display: true,
-      text: 'Chart.js Bar Chart - Stacked'
-    },
-  },
-  responsive: true,
-  scales: {
-    x: {
-      stacked: true,
-    },
-    y: {
-      stacked: true
-    }
-  }
-};
-
-const transactionChartData = {
-  responsive: true,
-  maintainAspectRatio: false,
-  scales: {
-    x: {
-      type: 'time',
-      time: {
-        displayFormats: {
-          quarter: 'MMM YYYY'
-        }
-      }
-    },
-    y: {
-      grid: {
-        lineWidth: function(context) {
-          if(context.tick.value === 0) {
-            return 3
-          }
-          return 1
-        },
-        color: function(context) {
-          if(context.tick.value === 0) {
-            return "#000000"
-          }
-          return "#717171"
-        }
-      }
-    }
-  },
-  plugins: {
-    autocolors,
-    title: {
-      display: true,
-      fullSize: true,
-      font: {
-        size: 36
-      },
-    },
-    tooltip: {
-      callbacks: {
-        afterBody: function(context) {
-          var transaction = context[0].raw.transaction
-          return `Vendor: ${transaction.vendor}\n` +
-            `Amount: ${transaction.amount}\n` +
-            `Category: ${transaction.categoryOverride}\n`
-        }
-      }
-    },
-    zoom: {
-      pan: {
-        enabled: true,
-        mode: 'xy',
-      },
-      limits: {
-        // axis limits
-      },
-      zoom: {
-        wheel: {
-          enabled: true,
-        },
-        pinch: {
-          enabled: true
-        },
-        mode: 'xy',
-      }
-    }
-  }
-}
-
-const categorySpendingPerMonthChartData = ref({})
-const allTransactionChartData = ref({})
-const stackedBarChartData = ref({})
-
 getTransactions()
-
-function sumTransactions(income = true, expenses = true, ignoreInvestments = false) {
-  var total = 0
-  transactionList.value.forEach((transaction) => {
-    // Corrections should only apply to expenses to reduce them.
-    if(transaction.purchaseType.toLowerCase() === "correction") {
-      if(expenses) {
-        total += Number(transaction.amount)
-      }
-    } else {
-      if ((expenses && Number(transaction.amount) < 0) || (income && Number(transaction.amount) > 0)) {
-        if (ignoreInvestments) {
-          if (transaction.categoryOverride.toLowerCase() !== "investment") {
-            total += Number(transaction.amount)
-          }
-        } else {
-          total += Number(transaction.amount)
-        }
-      }
-    }
-  })
-  return Math.round(total * 100) / 100
-}
-
-function sumTransactionsByField(field, income = true, expenses = true) {
-  var categoryTotals = {}
-
-  function addToCategoryTotal(transaction) {
-    var categoryName = transaction[field]
-
-    if(categoryName === "" || categoryName === undefined) {
-      categoryName = "Unknown"
-    }
-
-    if (categoryTotals[categoryName] === undefined) {
-      categoryTotals[categoryName] = Number(transaction.amount);
-    } else {
-      categoryTotals[categoryName] += Number(transaction.amount);
-    }
-  }
-
-  var shouldCountAsExpense = (transaction) => expenses && Number(transaction.amount) < 0
-  var shouldCountAsIncome = (transaction) => income && Number(transaction.amount) > 0
-
-  transactionList.value.forEach((transaction) => {
-    // If the transaction is a Correction we need to:
-    // Consider it in expenses - even if we made money from it.
-    // But not consider it in income.
-    if(transaction.purchaseType.toLowerCase() === "correction") {
-      if(expenses) {
-        addToCategoryTotal(transaction)
-      }
-    } else {
-      if(shouldCountAsExpense(transaction) || shouldCountAsIncome(transaction)) {
-        addToCategoryTotal(transaction)
-      }
-    }
-
-
-  });
-
-  return categoryTotals;
-}
-
-function getCumulativeTransactionHistory() {
-  var currentBalance = 0
-  var data = transactionList.value
-      .sort((a, b) => Number(b.amount) - Number(a.amount))
-      .sort((a, b) => moment(a.date, "YYYY-MM-DDTHH:mm") - moment(b.date, "YYYY-MM-DDTHH:mm"))
-      .map((transaction) => {
-        currentBalance = currentBalance + Number(transaction.amount)
-        return {
-          x: moment(transaction.date, "YYYY-MM-DDTHH:mm"),
-          y: currentBalance,
-          transaction: transaction
-        }
-      })
-
-  return [{
-    label: "Account",
-    data: data,
-  }]
-}
-
-function getMonthlySpendingByCategory() {
-  monthlyCategoryList.value = []
-  // Get months
-  var monthsAsList = transactionList.value
-      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm"))
-      .sort((a, b) => a - b)
-      .map((value) => value.format("MMMM YYYY"))
-
-  // Filter unique values
-  var months = [...new Set(monthsAsList)]
-
-  // Get unique category names
-  var categoryList = transactionList.value.map((it) => it.categoryOverride)
-  var categories = [...new Set(categoryList)]
-      .map((categoryName) => {
-        return {
-          type: "line",
-          label: categoryName,
-          data: [],
-          backgroundColor: getCategoryColor(categoryName),
-          borderColor: getCategoryColor(categoryName),
-        }
-      })
-
-  categories.forEach((category) => {
-
-    var transactionsInCategory = transactionList.value
-        .filter((transaction) => transaction.categoryOverride === category.label)
-
-    // Also loop each month...
-    months.forEach((month) => {
-      var monthlyTotal = transactionsInCategory
-          .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
-          .reduce((acc, value) => acc + Number(value.amount), 0)
-
-      category.data.push({x: moment(month, "MMMM YYYY"), y: monthlyTotal})
-
-      monthlyCategoryList.value.push({
-        category: category.label,
-        month: month,
-        value: monthlyTotal,
-      })
-    })
-  })
-
-  return categories
-}
-
-function getMonthlySpendingByCategoryStacked() {
-  monthlyCategoryList.value = []
-  // Get months
-  var monthsAsList = transactionList.value
-      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm"))
-      .sort((a, b) => a - b)
-      .map((value) => value.format("MMMM YYYY"))
-
-  // Filter unique values
-  var months = [...new Set(monthsAsList)]
-
-  // Get unique category names
-  var categoryList = transactionList.value.map((it) => it.categoryOverride)
-  var categories = [...new Set(categoryList)]
-      .map((categoryName) => {
-        return {
-          label: categoryName,
-          data: [],
-          type: 'bar',
-          stack: 'combined',
-          backgroundColor: rgbToRgba(getCategoryColor(categoryName)),
-          borderColor: rgbToRgba(getCategoryColor(categoryName)),
-        }
-      })
-
-  categories.forEach((category) => {
-
-    var transactionsInCategory = transactionList.value
-        .filter((transaction) => transaction.categoryOverride === category.label)
-
-    // Also loop each month...
-    months.forEach((month) => {
-      var monthlyTotal = transactionsInCategory
-          .filter((transaction) => moment(transaction.date, "YYYY-MM-DDTHH:mm").format("MMMM YYYY") === month)
-          .reduce((acc, value) => acc + Number(value.amount), 0)
-
-      category.data.push(monthlyTotal)
-    })
-  })
-
-  return categories
-}
-
-function filterTable(item, filter) {
-  return item.month.startsWith(filter)
-}
-
-function sumColumn(items, field) {
-  return items.reduce((acc, item) => acc + item[field.key], 0)
-}
-
-function getMonths() {
-  const months = transactionList.value
-      .map((value) => moment(value.date, "YYYY-MM-DDTHH:mm"))
-      .sort((a, b) => a - b)
-      .map((value) => value.format("MMMM YYYY"))
-  // Remove duplicates
-  return [...new Set(months)]
-}
-
-function formatChartData() {
-  // Populate chart data.
-  categorySpendingPerMonthChartData.value = {
-    labels: [],
-    datasets: getMonthlySpendingByCategory()
-  }
-
-  stackedBarChartData.value = {
-    labels: getMonths(),
-    datasets: getMonthlySpendingByCategoryStacked().concat(getMonthlySpendingByCategory()),
-  }
-
-  allTransactionChartData.value = {
-    labels: [],
-    datasets: getCumulativeTransactionHistory()
-  }
-}
 </script>
 
 <template>
-  <main>
-    <div>
-      <BDropdown v-model="shouldShow" text="TimeScale" class="m-3">
-        <BDropdownItem @click="changeTimeRange(1)">1 Month</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(3)">3 Months</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(6)">6 Months</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(12)">1 Year</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(24)">2 Years</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(36)">3 Years</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(48)">4 Years</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(60)">5 Years</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(600)">10 Years</BDropdownItem>
-        <BDropdownItem @click="changeTimeRange(900)">All</BDropdownItem>
-      </BDropdown>
-
-      <div v-if="transactionList.length !== 0" class="m-3">
-        <BCard class="text-center m-3" :key="sumTransactions(true, false)">
-          <h2>{{monthsAgo}} Month Summary</h2>
-          <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-            <h3><b>Total:</b> ${{ sumTransactions() }}</h3>
-            <h3><b>Total (w/o Investments):</b> ${{ sumTransactions(true, true, true) }}</h3>
-            <BRow style="height: 400px">
-              <BCol>
-                <PieChart :valueMap="sumTransactionsByField('categoryOverride', true, false)" :title="'Income: $' + sumTransactions(true, false)"/>
-              </BCol>
-              <BCol>
-                <PieChart :valueMap="sumTransactionsByField('categoryOverride', false)" :title="'Expenses: $' + sumTransactions(false, true)"/>
-              </BCol>
-            </BRow>
-          </BContainer>
-          <BContainer v-else>
-            <h1>No data</h1>
-          </BContainer>
-        </BCard>
-
-        <BCard class="text-center m-3" :key="sumTransactions(true, false)" >
-          <h2>{{monthsAgo}} Month Total</h2>
-          <div v-if="allTransactionChartData.datasets?.length !== undefined && allTransactionChartData.datasets.length > 0">
-            <Line :data="allTransactionChartData" :options="transactionChartData" style="width: 100%" />
-          </div>
-          <div v-else>
-            <h1>No data</h1>
-          </div>
-        </BCard>
-
-        <BCard class="text-center m-3" >
-          <h2>{{monthsAgo}} Month Total</h2>
-
-          <BRow>
-            <div v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-              <Line :options="stackedBarChartConfig" :data="stackedBarChartData" style="width: 100%" />
-            </div>
-            <div v-else>
-              <h1>No data</h1>
-            </div>
-          </BRow>
-        </BCard>
-
-        <BCard class="text-center m-3" >
-          <h2>Category Totals</h2>
-
-          <BFormGroup
-              class="p-2 m-2"
-              id="input-vendor-regex"
-              label-for="filterText"
+  <main class="dashboard">
+    <!-- One filter row, scoping everything below it. -->
+    <div class="filter-row">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <span class="filter-label">Range</span>
+        <BButtonGroup size="sm">
+          <BButton
+            v-for="r in RANGES"
+            :key="r.months"
+            :variant="monthsAgo === r.months ? 'primary' : 'outline-secondary'"
+            @click="changeTimeRange(r.months)"
           >
-            <BInputGroup prepend="Month Filter">
-              <BFormInput
-                  id="filterText"
-                  v-model="filterText"
-                  type="text"
-                  placeholder="Month Filter"
-              />
-            </BInputGroup>
-          </BFormGroup>
-
-          <BContainer v-if="categoryListToTableList().length !== undefined && categoryListToTableList().length > 0">
-
-            <BPagination
-                v-model="categoryCurrentPage"
-                :total-rows="categoryListToTableList().length"
-                :per-page="categoryPerPage"
-                class="justify-content-center"
-                first-number
-                last-number
-                :limit="5"
-            />
-            <BTable
-                :key="listSize"
-                :sort-by="[{key: 'date', order: 'desc'}]"
-                :items="categoryListToTableList()"
-                :per-page="categoryPerPage"
-                :current-page="categoryCurrentPage"
-                :filterable="['month']"
-                :filter="filterText"
-                :filter-function="filterTable"
-                emptyText="No data"
-                striped
-                small
-                bordered
-                responsive
-            >
-              <template #custom-foot="ctx">
-                <BTr>
-                  <BTh v-for="field in ctx.fields">
-                    <p v-if="field.key === 'month'">
-                      TOTAL:
-                    </p>
-                    <p v-else>
-                      {{ Math.round(sumColumn(ctx.items, field) * 100) / 100 }}
-                    </p>
-                  </BTh>
-                </BTr>
-              </template>
-            </BTable>
-            <BPagination
-                v-model="categoryCurrentPage"
-                :total-rows="categoryListToTableList().length"
-                :per-page="categoryPerPage"
-                class="justify-content-center"
-                first-number
-                last-number
-                :limit="5"
-            />
-          </BContainer>
-          <BContainer v-else>
-            <h1>No data</h1>
-          </BContainer>
-        </BCard>
-
-        <BCard class="text-center m-3" :key="sumTransactions(true, false)">
-          <h2>Insights</h2>
-          <BContainer class="m-4" v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-            <BRow style="height: 400px">
-              <BCol>
-                <PieChart :valueMap="sumTransactionsByField('location', false)" title="Location"/>
-              </BCol>
-              <BCol>
-                <PieChart :valueMap="sumTransactionsByField('account', false)" title="Account"/>
-              </BCol>
-            </BRow>
-            <BRow>
-              <BarChart :valueMap="sumTransactionsByField('vendor', false)" title="Spending By Vendor"/>
-            </BRow>
-
-          </BContainer>
-          <BContainer v-else>
-            <h1>No data</h1>
-          </BContainer>
-        </BCard>
-
-        <BCard class="text-center m-3" >
-          <h2>Transaction History</h2>
-          <BContainer v-if="categorySpendingPerMonthChartData.datasets?.length !== undefined && categorySpendingPerMonthChartData.datasets.length > 0">
-
-            <BPagination
-                v-model="currentPage"
-                :total-rows="transactionList.length"
-                :per-page="perPage"
-                class="justify-content-center"
-                first-number
-                last-number
-                :limit="5"
-            />
-            <BTable
-                :key="listSize"
-                :sort-by="[{key: 'date', order: 'desc'}]"
-                :items="transactionList"
-                :fields="sortFields"
-                :per-page="perPage"
-                :current-page="currentPage"
-                emptyText="No data"
-            />
-            <BPagination
-                v-model="currentPage"
-                :total-rows="transactionList.length"
-                :per-page="perPage"
-                class="justify-content-center"
-                first-number
-                last-number
-                :limit="5"
-            />
-          </BContainer>
-          <BContainer v-else>
-            <h1>No data</h1>
-          </BContainer>
-        </BCard>
-      </div>
-      <div v-else>
-        <BCard>
-          <BAlert :model-value="true" variant="info">
-            <h1>First time visitor?</h1>
-            <h3>Welcome!</h3>
-
-            <p>This is a personal finance tracker that allows you to track your spending habits and view insights into your finances.</p>
-
-            <p>Start by clicking the "Import" tab and importing your transactions.</p>
-            <p>All data is stored locally within your browser.</p>
-          </BAlert>
-
-          <BAlert :model-value="true" variant="warning">
-            <h1>Return user?</h1>
-
-            No transactions available in the last {{monthsAgo}} months.
-            Please select a larger time-range.
-          </BAlert>
-        </BCard>
+            {{ r.label }}
+          </BButton>
+        </BButtonGroup>
       </div>
 
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <span class="filter-label">Group by</span>
+        <BButtonGroup size="sm">
+          <BButton
+            v-for="i in INTERVALS"
+            :key="i.value"
+            :variant="interval === i.value ? 'primary' : 'outline-secondary'"
+            @click="interval = i.value"
+          >
+            {{ i.label }}
+          </BButton>
+        </BButtonGroup>
+      </div>
 
+      <div v-if="accounts.length > 1" class="d-flex align-items-center gap-2">
+        <span class="filter-label">Account</span>
+        <BFormSelect v-model="accountFilter" size="sm" style="width: auto">
+          <option value="all">All accounts</option>
+          <option v-for="a in accounts" :key="a" :value="a">{{ a }}</option>
+        </BFormSelect>
+      </div>
+
+      <div class="ms-auto filter-meta">
+        <span v-if="rangeLabel">{{ rangeLabel }} · </span>
+        {{ stats.transactionCount.toLocaleString() }} transactions
+      </div>
     </div>
+
+    <div v-if="rows.length" class="dashboard-body" :class="{ 'is-loading': loading }">
+      <!-- KPI row: headline numbers are tiles, not one-bar charts. -->
+      <BRow class="g-3 mb-4">
+        <BCol cols="12" sm="6" lg="3">
+          <StatTile
+            label="Money out"
+            :value="money(stats.spend)"
+            :hint="`Everything spent across ${stats.months} ${stats.months === 1 ? 'month' : 'months'}`"
+            :trend="monthlySpendTrend"
+          />
+        </BCol>
+        <BCol cols="12" sm="6" lg="3">
+          <StatTile
+            label="Money in"
+            :value="money(stats.income)"
+            :hint="`Everything received across ${stats.months} ${stats.months === 1 ? 'month' : 'months'}`"
+            :trend="monthlyIncomeTrend"
+          />
+        </BCol>
+        <BCol cols="12" sm="6" lg="3">
+          <StatTile
+            label="Net"
+            :value="money(stats.net)"
+            :delta="stats.savingsRate == null ? '' : `${percent(stats.savingsRate)} of income`"
+            :delta-tone="stats.net >= 0 ? 'good' : 'bad'"
+            delta-direction="none"
+            :hint="`Excludes ${money(stats.transfers)} in transfers`"
+          />
+        </BCol>
+        <BCol cols="12" sm="6" lg="3">
+          <StatTile
+            label="Recurring charges"
+            :value="`${money(activeRecurringMonthly)}/mo`"
+            :hint="`${money(activeRecurringMonthly * 12)} per year`"
+          />
+        </BCol>
+      </BRow>
+
+      <BRow class="g-3 mb-4">
+        <BCol cols="12" sm="6" lg="4">
+          <StatTile
+            label="A typical single month"
+            :value="money(stats.medianMonthlySpend)"
+            unit="out"
+            second-label="In"
+            :second-value="money(stats.medianMonthlyIncome)"
+            :hint="`Middle month of the ${stats.months} in range — not the total above`"
+          />
+        </BCol>
+        <BCol cols="12" sm="6" lg="4">
+          <StatTile
+            v-if="stats.topFamily"
+            label="Biggest category"
+            :value="stats.topFamily.family"
+            :delta="`${money(stats.topFamily.total)} · ${percent(stats.topFamily.share)}`"
+            delta-tone="neutral"
+            hint="Share of spending in range"
+          />
+        </BCol>
+        <BCol cols="12" sm="6" lg="4">
+          <StatTile
+            v-if="stats.biggestExpense"
+            label="Largest single purchase"
+            :value="money(stats.biggestExpense.spend)"
+            :hint="`${stats.biggestExpense.vendor} · ${dateLabel(stats.biggestExpense.date)}`"
+          />
+        </BCol>
+      </BRow>
+
+      <!-- The most actionable panel, so it sits above the history. -->
+      <SavingsIdeas :rows="rows" />
+
+      <!-- Time series: all respect the Group by interval. -->
+      <CashflowChart :rows="rows" :interval="interval" />
+      <CategoryStackChart :rows="rows" :interval="interval" />
+      <SavingsRateChart :rows="rows" :interval="interval" />
+      <CategoryHeatmap :rows="rows" :interval="interval" @select-month="focusMonth = $event" />
+
+      <!-- A single month in isolation. -->
+      <MonthDetail :rows="rows" :month="focusMonth" @update:month="focusMonth = $event" />
+
+      <CategoryShareChart :rows="rows" />
+      <TopVendorsChart :rows="rows" />
+
+      <BRow class="g-0">
+        <BCol cols="12" xl="6" class="pe-xl-2">
+          <WeekdayProfileChart :rows="rows" />
+        </BCol>
+        <BCol cols="12" xl="6" class="ps-xl-2">
+          <TicketSizeChart :rows="rows" />
+        </BCol>
+      </BRow>
+
+      <BalanceChart :rows="rows" :interval="interval" />
+      <RecurringTable :rows="rows" />
+
+      <!-- Data-quality panel: the numbers above are only as good as the input. -->
+      <BCard v-if="quality.length" class="panel mb-4" body-class="p-3 p-md-4">
+        <h3 class="panel-title mb-3">Worth cleaning up</h3>
+        <BAlert
+          v-for="issue in quality"
+          :key="issue.label"
+          :model-value="true"
+          :variant="issue.severity === 'warning' ? 'warning' : 'secondary'"
+          class="text-start py-2 mb-2"
+        >
+          <strong>{{ issue.label }}</strong>
+          <span v-if="issue.value"> — {{ money(issue.value) }}</span>
+          <div class="small">{{ issue.detail }}</div>
+        </BAlert>
+      </BCard>
+
+      <!-- Transaction history. -->
+      <BCard class="panel mb-4" body-class="p-3 p-md-4">
+        <h3 class="panel-title mb-3">Transaction history</h3>
+        <TransactionTable :rows="recentFirst" :per-page="25" />
+      </BCard>
+    </div>
+
+    <!-- Empty states -->
+    <div v-else-if="loading && !loaded" class="empty-state">
+      <BSpinner small /> Loading transactions…
+    </div>
+
+    <BCard v-else class="panel">
+      <BAlert :model-value="true" variant="info" class="text-start">
+        <h4>First time here?</h4>
+        <p class="mb-0">Start with the <strong>Import</strong> tab. All data stays in your browser.</p>
+      </BAlert>
+      <BAlert :model-value="true" variant="warning" class="text-start mb-0">
+        <h4>Returning?</h4>
+        <p class="mb-0">Nothing in the last {{ monthsAgo }} months — try a longer range above.</p>
+      </BAlert>
+    </BCard>
   </main>
 </template>
+
+<style scoped>
+.dashboard {
+  padding: 0 0.5rem 3rem;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.02);
+  position: sticky;
+  top: var(--app-header-h);
+  z-index: 10;
+  backdrop-filter: blur(8px);
+}
+
+.filter-label {
+  font-size: 0.8125rem;
+  color: #898781;
+}
+
+.filter-meta {
+  font-size: 0.8125rem;
+  color: #898781;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Refetch holds the previous render instead of flashing a skeleton. */
+.dashboard-body {
+  transition: opacity 0.2s;
+}
+
+.dashboard-body.is-loading {
+  opacity: 0.55;
+}
+
+.panel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.panel-title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.panel-subtitle {
+  font-size: 0.875rem;
+  color: #c3c2b7;
+}
+
+.num-table :deep(td),
+.num-table :deep(th) {
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+}
+
+.family-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.5rem;
+  vertical-align: 1px;
+}
+
+
+.empty-state {
+  padding: 4rem 0;
+  text-align: center;
+  color: #898781;
+}
+</style>

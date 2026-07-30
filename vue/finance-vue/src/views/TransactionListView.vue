@@ -1,372 +1,459 @@
 <script setup>
-import {ref, reactive} from "vue";
-import {BTable, useToast} from 'bootstrap-vue-next';
-import api from "@/utils/apiProvider.js"
+/**
+ * Transactions page: search and filter everything, then optionally bulk-edit
+ * what is showing.
+ *
+ * Filtering used to happen server-side - every keystroke in a column header
+ * fired a request, and each field was an exact-match test, so "amount" only
+ * worked if you typed the cents correctly. Now the range is fetched once and
+ * filtered in the browser: instant, case-insensitive, and it can express things
+ * the old query could not (amount ranges, date ranges, kind, family).
+ */
+import { computed, ref } from 'vue'
+import { useToast } from 'bootstrap-vue-next'
+import api from '@/utils/apiProvider.js'
+import { FAMILIES, OTHER_FAMILY, prepare } from '@/utils/analytics.js'
+import { categories } from '@/utils/categoryColors.js'
+import { money } from '@/utils/format.js'
+import TransactionTable from '@/components/TransactionTable.vue'
 
+const { show } = useToast()
 
-const {show} = useToast()
+const rawTransactions = ref([])
+const loading = ref(false)
+const loaded = ref(false)
 
-const updateTransactionModal = ref(false)
+// ---- filters ---------------------------------------------------------------
+const search = ref('')
+const accountFilter = ref('all')
+const familyFilter = ref('all')
+const kindFilter = ref('all')
+const minAmount = ref('')
+const maxAmount = ref('')
+const dateFrom = ref('')
+const dateTo = ref('')
 
-const transactionList = ref([])
-const currentPage = ref(1)
-const perPage = 100
-const transactionUpdateOptions = ref({
-  vendor: null,
-  amount: null,
-  account: null,
-  category: null,
-  type: null,
-  location: null,
-})
-const transactionQuery = ref({
-  vendor: null,
-  amount: null,
-  account: null,
-  category: null,
-  type: null,
-  location: null,
-})
-const fields = [
-  {key: 'date', sortable: true},
-  {key: 'vendor', sortable: true},
-  {key: 'account', sortable: true},
-  {key: 'location', sortable: true},
-  {key: 'purchaseType', sortable: true},
-  {key: 'categoryOverride', sortable: true},
-  {key: 'amount', sortable: true},
+const KINDS = [
+  { value: 'all', label: 'All kinds' },
+  { value: 'expense', label: 'Spent' },
+  { value: 'income', label: 'Received' },
+  { value: 'transfer', label: 'Transfers' },
+  { value: 'reversal', label: 'Reversed (holds & refunds)' },
 ]
 
-function getTransactions() {
-  transactionList.value = []
-  if(isAnyQuery()) {
-    transactionQuery.value = fixOptionalTransaction(transactionQuery.value)
-    api.getTransactions(transactionQuery.value).then((success) => {
-      show?.({
-        props: {
-          title: "Success",
-          body: "Found " + success.data.transactions.length + " transactions matching filter.",
-          variant: "success",
-          pos: "bottom-right"
-        }
-      })
-      transactionList.value = success.data.transactions;
-    }, (failure) => {
-      show?.({
-        props: {
-          title: "Failed to get transactions",
-          body: failure.message,
-          variant: "danger",
-          pos: "bottom-right"
-        }
-      })
-    })
-  } else {
-    transactionList.value = []
-    show?.({
-      props: {
-        title: "Update Query",
-        body: "Must filter to query.",
-        variant: "info",
-        pos: "bottom-right"
-      }
-    })
-  }
+const allRows = computed(() => prepare(rawTransactions.value))
+const accounts = computed(() => [...new Set(allRows.value.map((r) => r.account))].sort())
+
+const activeFilterCount = computed(
+  () =>
+    [
+      search.value.trim(),
+      accountFilter.value !== 'all',
+      familyFilter.value !== 'all',
+      kindFilter.value !== 'all',
+      minAmount.value,
+      maxAmount.value,
+      dateFrom.value,
+      dateTo.value,
+    ].filter(Boolean).length,
+)
+
+function clearFilters() {
+  search.value = ''
+  accountFilter.value = 'all'
+  familyFilter.value = 'all'
+  kindFilter.value = 'all'
+  minAmount.value = ''
+  maxAmount.value = ''
+  dateFrom.value = ''
+  dateTo.value = ''
 }
 
-function isAnyQuery() {
-  return transactionQuery.value.vendor !== null ||
-      transactionQuery.value.amount !== null ||
-      transactionQuery.value.account !== null ||
-      transactionQuery.value.category !== null ||
-      transactionQuery.value.type !== null ||
-      transactionQuery.value.location !== null
-}
+const filtered = computed(() => {
+  const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const min = minAmount.value === '' ? null : Math.abs(Number(minAmount.value))
+  const max = maxAmount.value === '' ? null : Math.abs(Number(maxAmount.value))
+  const from = dateFrom.value ? new Date(`${dateFrom.value}T00:00:00`).getTime() : null
+  const to = dateTo.value ? new Date(`${dateTo.value}T23:59:59`).getTime() : null
 
-function fixOptionalTransaction(optionalTransaction) {
-  if(optionalTransaction.vendor === "") {
-    optionalTransaction.vendor = null
-  }
-  if(optionalTransaction.amount === "") {
-    optionalTransaction.amount = null
-  }
-  if(optionalTransaction.account === "") {
-    optionalTransaction.account = null
-  }
-  if(optionalTransaction.category === "") {
-    optionalTransaction.category = null
-  }
-  if(optionalTransaction.type === "") {
-    optionalTransaction.type = null
-  }
-  if(optionalTransaction.location === "") {
-    optionalTransaction.location = null
-  }
-  return optionalTransaction
-}
-
-function updateAllTransactions() {
-  // Update empty strings to null
-  transactionUpdateOptions.value = fixOptionalTransaction(transactionUpdateOptions.value)
-  var ids = transactionList.value.map((it) => it.id)
-
-  show?.({
-    props: {
-      title: `Updating Transactions.`,
-      body: "Please wait. This may take a while...",
-      variant: "info",
-      pos: "bottom-right"
+  return allRows.value.filter((r) => {
+    if (accountFilter.value !== 'all' && r.account !== accountFilter.value) return false
+    if (kindFilter.value !== 'all' && r.flow !== kindFilter.value) return false
+    if (familyFilter.value !== 'all') {
+      const family = FAMILIES.includes(r.family) ? r.family : OTHER_FAMILY
+      if (family !== familyFilter.value) return false
     }
-  })
+    const magnitude = Math.abs(r.amount)
+    if (min != null && magnitude < min) return false
+    if (max != null && magnitude > max) return false
+    if (from != null && r.ts < from) return false
+    if (to != null && r.ts > to) return false
 
-  var promises = ids.map((id) => {
-    api.updateTransaction(id, transactionUpdateOptions.value).then(
-        (success) => {}, (failure) => {
+    if (terms.length) {
+      // Every word has to appear somewhere in the row, so "shell march" works.
+      const haystack = `${r.vendor} ${r.category} ${r.account} ${r.location} ${r.type} ${r.family}`.toLowerCase()
+      if (!terms.every((t) => haystack.includes(t))) return false
+    }
+    return true
+  })
+})
+
+const recentFirst = computed(() => filtered.value.slice().reverse())
+
+const totals = computed(() => {
+  let out = 0
+  let inc = 0
+  for (const r of filtered.value) {
+    out += r.spend
+    inc += r.income
+  }
+  return { out, inc, net: inc - out }
+})
+
+// ---- fetching --------------------------------------------------------------
+/**
+ * The server deserialises this into a Kotlin `OptionalTransaction` whose six
+ * fields have no defaults, so kotlinx.serialization rejects a partial object
+ * with a 400 - every key has to be present even when null. Null means "do not
+ * filter on this field", so an all-null query returns everything.
+ */
+const emptyQuery = () => ({
+  vendor: null,
+  amount: null,
+  account: null,
+  category: null,
+  type: null,
+  location: null,
+})
+
+function getTransactions() {
+  loading.value = true
+  return api.getTransactions(emptyQuery()).then(
+    (transactions) => {
+      rawTransactions.value = transactions ?? []
+      loading.value = false
+      loaded.value = true
+    },
+    (failure) => {
+      loading.value = false
+      loaded.value = true
       show?.({
         props: {
-          title: `Failed to update transaction ${id}`,
+          title: 'Failed to get transactions',
           body: failure.message,
-          variant: "danger",
-          pos: "bottom-right"
-        }
+          variant: 'danger',
+          pos: 'bottom-right',
+        },
       })
-    })
-  })
-
-  Promise.all(promises).then((success) => {
-    show?.({
-      props: {
-        title: `Success.`,
-        body: "Successfully updated all transactions.",
-        variant: "success",
-        pos: "bottom-right"
-      }
-    })
-
-    getTransactions()
-  })
-}
-
-function openUpdateModal() {
-  transactionUpdateOptions.value = {
-    vendor: null,
-    amount: null,
-    account: null,
-    category: null,
-    type: null,
-    location: null,
-  }
-  updateTransactionModal.value = true
+    },
+  )
 }
 
 getTransactions()
+
+// ---- bulk edit -------------------------------------------------------------
+const updateTransactionModal = ref(false)
+const transactionUpdateOptions = ref(emptyQuery())
+
+function openUpdateModal() {
+  transactionUpdateOptions.value = emptyQuery()
+  updateTransactionModal.value = true
+}
+
+/**
+ * Same all-keys-required contract as the query. The server skips null and empty
+ * fields, so a blank input means "leave it alone". `amount` has to arrive as a
+ * JSON number, not the string the input gives us, or the Double decode 400s.
+ */
+function buildUpdate() {
+  const form = transactionUpdateOptions.value
+  const text = (v) => (v == null || String(v).trim() === '' ? null : String(v).trim())
+  const amount = Number(form.amount)
+  return {
+    vendor: text(form.vendor),
+    amount: form.amount == null || String(form.amount).trim() === '' || !Number.isFinite(amount) ? null : amount,
+    account: text(form.account),
+    category: text(form.category),
+    type: text(form.type),
+    location: text(form.location),
+  }
+}
+
+function updateAllTransactions() {
+  const update = buildUpdate()
+  if (Object.values(update).every((v) => v === null)) {
+    show?.({
+      props: { title: 'Nothing to change', body: 'Fill in at least one field.', variant: 'warning', pos: 'bottom-right' },
+    })
+    return
+  }
+
+  const ids = filtered.value.map((r) => r.id).filter((id) => id !== undefined)
+  show?.({
+    props: {
+      title: `Updating ${ids.length} transactions`,
+      body: 'Please wait…',
+      variant: 'info',
+      pos: 'bottom-right',
+    },
+  })
+
+  Promise.all(
+    ids.map((id) =>
+      api.updateTransaction(id, { ...update }).catch((failure) => {
+        show?.({
+          props: {
+            title: `Failed to update transaction ${id}`,
+            body: failure.message,
+            variant: 'danger',
+            pos: 'bottom-right',
+          },
+        })
+      }),
+    ),
+  ).then(() => {
+    show?.({
+      props: { title: 'Done', body: `Updated ${ids.length} transactions.`, variant: 'success', pos: 'bottom-right' },
+    })
+    getTransactions()
+  })
+}
 </script>
 
 <template>
-  <main>
-    <div>
-      <BModal
-          v-model="updateTransactionModal"
-          id="modal-center"
-          centered
-          title="Bulk Update Transactions"
-          cancel-title="Cancel"
-          cancel-variant="danger"
-          ok-title="Update ALL"
-          ok-variant="warning"
-          @ok="updateAllTransactions">
+  <main class="txn-page">
+    <datalist id="filter-category-list">
+      <option v-for="category in categories" :key="category" :value="category" />
+    </datalist>
 
-        <BAlert :model-value="true" variant="warning">
-          Performing this update will change {{ transactionList.length }} transactions.
-          Proceed with caution!
-        </BAlert>
+    <!-- One filter row, scoping the table below it. -->
+    <div class="filter-panel">
+      <BFormInput
+        v-model="search"
+        type="search"
+        placeholder="Search vendor, category, account, location…"
+        class="search-input"
+      />
 
-        <BForm>
-          <BFormGroup
-              class="p-2 m-2"
-              id="update-transaction-form"
-              label-for="updateTransactions"
-          >
-            <BInputGroup prepend="Vendor" class="p-2 m-2">
-              <BFormInput
-                  id="updateVendor"
-                  v-model="transactionUpdateOptions.vendor"
-                  type="text"
-                  placeholder="Vendor"
-                  required
-              />
-            </BInputGroup>
-            <BInputGroup prepend="Amount" class="p-2 m-2">
-              <BFormInput
-                  id="updateAmount"
-                  v-model="transactionUpdateOptions.amount"
-                  type="number"
-                  placeholder="Amount"
-                  required
-              />
-            </BInputGroup>
-            <BInputGroup prepend="Account" class="p-2 m-2">
-              <BFormInput
-                  id="updateAccount"
-                  v-model="transactionUpdateOptions.account"
-                  type="text"
-                  placeholder="Account"
-                  required
-              />
-            </BInputGroup>
-            <BInputGroup prepend="Category" class="p-2 m-2">
-              <BFormInput
-                  id="updateCategory"
-                  v-model="transactionUpdateOptions.category"
-                  type="text"
-                  placeholder="Category"
-                  required
-              />
-            </BInputGroup>
-            <BInputGroup prepend="Type" class="p-2 m-2">
-              <BFormInput
-                  id="updateType"
-                  v-model="transactionUpdateOptions.type"
-                  type="text"
-                  placeholder="Type"
-                  required
-              />
-            </BInputGroup>
-            <BInputGroup prepend="Location" class="p-2 m-2">
-              <BFormInput
-                  id="updateLocation"
-                  v-model="transactionUpdateOptions.location"
-                  type="text"
-                  placeholder="Location"
-                  required
-              />
-            </BInputGroup>
-          </BFormGroup>
-        </BForm>
-      </BModal>
+      <div class="filter-grid">
+        <label class="field">
+          <span class="field-label">Kind</span>
+          <BFormSelect v-model="kindFilter" size="sm">
+            <option v-for="k in KINDS" :key="k.value" :value="k.value">{{ k.label }}</option>
+          </BFormSelect>
+        </label>
 
-      <BCard class="text-center m-3" >
-        <h2>Transactions</h2>
-        <BContainer>
+        <label class="field">
+          <span class="field-label">Category</span>
+          <BFormSelect v-model="familyFilter" size="sm">
+            <option value="all">All categories</option>
+            <option v-for="f in FAMILIES" :key="f" :value="f">{{ f }}</option>
+            <option :value="OTHER_FAMILY">{{ OTHER_FAMILY }}</option>
+          </BFormSelect>
+        </label>
 
-          <BPagination
-              v-model="currentPage"
-              :total-rows="transactionList.length"
-              :per-page="perPage"
-              class="justify-content-center"
-              first-number
-              last-number
-              :limit="5"
-          />
-          <BTable
-              :key="transactionList.length"
-              :sort-by="[{key: 'date', order: 'desc'}]"
-              :items="transactionList"
-              :fields="fields"
-              :per-page="perPage"
-              :current-page="currentPage"
-              emptyText="No data"
-          >
-            <template #head(vendor)="data">
-              <BFormGroup>
-                <BInputGroup prepend="Vendor">
-                  <BFormInput
-                      id="updateVendor"
-                      v-model="transactionQuery.vendor"
-                      type="text"
-                      placeholder="Vendor"
-                      required
-                      @change="getTransactions"
-                  />
-                </BInputGroup>
-              </BFormGroup>
-            </template>
-            <template #head(account)="data">
-              <BFormGroup>
-                <BInputGroup prepend="Account">
-                  <BFormInput
-                      id="updateAccount"
-                      v-model="transactionQuery.account"
-                      type="text"
-                      placeholder="Account"
-                      required
-                      @change="getTransactions"
-                  />
-                </BInputGroup>
-              </BFormGroup>
-            </template>
-            <template #head(location)="data">
-              <BFormGroup>
-                <BInputGroup prepend="Location">
-                  <BFormInput
-                      id="updateLocation"
-                      v-model="transactionQuery.location"
-                      type="text"
-                      placeholder="Location"
-                      required
-                      @change="getTransactions"
-                  />
-                </BInputGroup>
-              </BFormGroup>
-            </template>
-            <template #head(purchaseType)="data">
-              <BFormGroup>
-                <BInputGroup prepend="Type">
-                  <BFormInput
-                      id="updateType"
-                      v-model="transactionQuery.type"
-                      type="text"
-                      placeholder="Type"
-                      required
-                      @change="getTransactions"
-                  />
-                </BInputGroup>
-              </BFormGroup>
-            </template>
-            <template #head(categoryOverride)="data">
-              <BFormGroup>
-                <BInputGroup prepend="Category">
-                  <BFormInput
-                      id="updateCategory"
-                      v-model="transactionQuery.category"
-                      type="text"
-                      placeholder="Category"
-                      required
-                      @change="getTransactions"
-                  />
-                </BInputGroup>
-              </BFormGroup>
-            </template>
-            <template #head(amount)="data">
-              <BFormGroup>
-                <BInputGroup prepend="Amount">
-                  <BFormInput
-                      id="updateAmount"
-                      v-model="transactionQuery.amount"
-                      type="text"
-                      placeholder="Amount"
-                      required
-                      @change="getTransactions"
-                  />
-                </BInputGroup>
-              </BFormGroup>
-            </template>
-          </BTable>
-          <BPagination
-              v-model="currentPage"
-              :total-rows="transactionList.length"
-              :per-page="perPage"
-              class="justify-content-center"
-              first-number
-              last-number
-              :limit="5"
-          />
-        </BContainer>
-      </BCard>
+        <label class="field">
+          <span class="field-label">Account</span>
+          <BFormSelect v-model="accountFilter" size="sm">
+            <option value="all">All accounts</option>
+            <option v-for="a in accounts" :key="a" :value="a">{{ a }}</option>
+          </BFormSelect>
+        </label>
 
-      <BCard>
-        <BButton variant="warning" @click="openUpdateModal()" >Update Showing Transactions</BButton>
-      </BCard>
+        <label class="field">
+          <span class="field-label">Amount between</span>
+          <div class="pair">
+            <BFormInput v-model="minAmount" type="number" size="sm" placeholder="min" min="0" />
+            <BFormInput v-model="maxAmount" type="number" size="sm" placeholder="max" min="0" />
+          </div>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Date from</span>
+          <BFormInput v-model="dateFrom" type="date" size="sm" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Date to</span>
+          <BFormInput v-model="dateTo" type="date" size="sm" />
+        </label>
+      </div>
+
+      <div class="filter-footer">
+        <span class="result-line">
+          <strong>{{ filtered.length.toLocaleString() }}</strong>
+          of {{ allRows.length.toLocaleString() }} transactions
+          <span class="sep">·</span>
+          <span class="out">{{ money(totals.out) }} out</span>
+          <span class="sep">·</span>
+          <span class="in">{{ money(totals.inc) }} in</span>
+          <span class="sep">·</span>
+          net {{ money(totals.net) }}
+        </span>
+        <BButton
+          v-if="activeFilterCount"
+          size="sm"
+          variant="outline-secondary"
+          @click="clearFilters"
+        >
+          Clear {{ activeFilterCount }} filter{{ activeFilterCount === 1 ? '' : 's' }}
+        </BButton>
+      </div>
     </div>
+
+    <BCard class="panel mb-3" body-class="p-3 p-md-4">
+      <div v-if="loading && !loaded" class="empty-state"><BSpinner small /> Loading transactions…</div>
+      <TransactionTable
+        v-else
+        :rows="recentFirst"
+        :per-page="50"
+        show-location
+        empty-text="No transactions match these filters."
+      />
+    </BCard>
+
+    <BCard class="panel">
+      <BButton variant="warning" :disabled="!filtered.length" @click="openUpdateModal">
+        Bulk-edit the {{ filtered.length.toLocaleString() }} showing transactions
+      </BButton>
+      <p class="hint mb-0 mt-2">
+        Applies only to rows matching the filters above. Leave a field blank to leave it unchanged.
+      </p>
+    </BCard>
+
+    <BModal
+      v-model="updateTransactionModal"
+      centered
+      title="Bulk update transactions"
+      cancel-title="Cancel"
+      cancel-variant="secondary"
+      ok-title="Apply to all showing"
+      ok-variant="warning"
+      @ok="updateAllTransactions"
+    >
+      <BAlert :model-value="true" variant="warning" class="py-2">
+        This will change <strong>{{ filtered.length.toLocaleString() }}</strong> transactions. There is
+        no undo.
+      </BAlert>
+
+      <BForm>
+        <BInputGroup prepend="Vendor" class="mb-2">
+          <BFormInput v-model="transactionUpdateOptions.vendor" placeholder="leave blank to keep" />
+        </BInputGroup>
+        <BInputGroup prepend="Category" class="mb-2">
+          <BFormInput
+            v-model="transactionUpdateOptions.category"
+            list="filter-category-list"
+            placeholder="leave blank to keep"
+          />
+        </BInputGroup>
+        <BInputGroup prepend="Account" class="mb-2">
+          <BFormInput v-model="transactionUpdateOptions.account" placeholder="leave blank to keep" />
+        </BInputGroup>
+        <BInputGroup prepend="Type" class="mb-2">
+          <BFormInput v-model="transactionUpdateOptions.type" placeholder="leave blank to keep" />
+        </BInputGroup>
+        <BInputGroup prepend="Location" class="mb-2">
+          <BFormInput v-model="transactionUpdateOptions.location" placeholder="leave blank to keep" />
+        </BInputGroup>
+        <BInputGroup prepend="Amount" class="mb-0">
+          <BFormInput
+            v-model="transactionUpdateOptions.amount"
+            type="number"
+            placeholder="leave blank to keep"
+          />
+        </BInputGroup>
+      </BForm>
+    </BModal>
   </main>
 </template>
+
+<style scoped>
+.txn-page {
+  padding: 0 0.5rem 3rem;
+}
+
+.filter-panel {
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.search-input {
+  margin-bottom: 0.875rem;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+}
+
+.field-label {
+  font-size: 0.75rem;
+  color: #898781;
+}
+
+.pair {
+  display: flex;
+  gap: 0.375rem;
+}
+
+.filter-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.875rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.result-line {
+  font-size: 0.875rem;
+  color: #c3c2b7;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-line strong {
+  color: #ffffff;
+}
+
+.out {
+  color: #e66767;
+}
+
+.in {
+  color: #3987e5;
+}
+
+.sep {
+  color: #4a5158;
+  margin: 0 0.25rem;
+}
+
+.panel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.hint {
+  font-size: 0.8125rem;
+  color: #898781;
+}
+
+.empty-state {
+  padding: 3rem 0;
+  text-align: center;
+  color: #898781;
+}
+</style>

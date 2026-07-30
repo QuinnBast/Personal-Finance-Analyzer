@@ -3,7 +3,8 @@ import localDb from './localDb.js';
 
 class FinanceApiFactory {
     constructor() {
-        this.useLocal = true;
+        // this.useLocal = true;
+        this.useLocal = false;
         this.provider = this.useLocal ? localDb : financeApi;
     }
 

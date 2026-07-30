@@ -34,6 +34,11 @@
   --color-text: var(--vt-c-text-light-1);
 
   --section-gap: 160px;
+
+  /* Height of the app header; sticky page furniture offsets by this. */
+  --app-header-h: 52px;
+  --brand-accent: #3987e5;
+  --brand-accent-soft: #6da7ec;
 }
 
 @media (prefers-color-scheme: dark) {

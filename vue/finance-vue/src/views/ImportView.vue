@@ -1,541 +1,934 @@
 <script setup>
-import {computed, ref} from "vue";
-import {BTable, useToast} from "bootstrap-vue-next";
-import moment from 'moment';
-import api from "@/utils/apiProvider.js"
+/**
+ * Import bank statements.
+ *
+ * The old page dropped you straight into a 30-row-per-page grid of every parsed
+ * transaction with a free-text category box on each one, and left the risky
+ * parts to a paragraph of instructions: "DO NOT select the current month, as the
+ * application does not filter out duplicate transactions."
+ *
+ * This version does the checking instead of warning about it:
+ *  - rows already in the database are detected and skipped by default;
+ *  - categories are filled in per *vendor*, not per row - a 140-row month is
+ *    usually 15 distinct vendors, most already covered by a rule;
+ *  - unparseable lines are listed with a reason rather than silently dropped;
+ *  - it says up front that the server discards credit-card payment rows, so the
+ *    "imported" count matching the row count is not a surprise;
+ *  - new vendor rules are created once per vendor, and only for vendors that do
+ *    not already have one.
+ */
+import { computed, ref } from 'vue'
+import { useToast } from 'bootstrap-vue-next'
+import api from '@/utils/apiProvider.js'
+import {
+  ACCOUNTS,
+  duplicateKey,
+  isCreditCardPayment,
+  parseStatement,
+} from '@/utils/statementParser.js'
+import { compileRules, findMatchingRule, vendorKeyOf } from '@/utils/vendorRules.js'
+import { categories as canonicalCategories, getCategoryColor } from '@/utils/categoryColors.js'
+import { money } from '@/utils/format.js'
 
-const {show} = useToast()
+const { show } = useToast()
+
 const files = ref([])
-const categoryList = ref([])
-const transactionsToImport = ref([])
-const currentPage = ref(1)
-const perPage = 30
-const regexTest = ref("")
-const matchingExistingCategories = ref([])
-const account = ref("Chequing")
-const fields = [
-  {
-    key: 'date',
-    label: 'Date',
-    sortable: true,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'vendor',
-    label: 'Vendor',
-    sortable: true,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'location',
-    label: 'Location',
-    sortable: true,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'type',
-    label: 'Type',
-    sortable: true,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'category',
-    label: 'Category',
-    sortable: false,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'account',
-    label: 'Account',
-    sortable: false,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'amount',
-    label: 'Amount',
-    sortable: true,
-    sortDirection: 'desc',
-  }
-]
+const rules = ref([])
+const existingKeys = ref(new Set())
+const contextLoaded = ref(false)
+const importing = ref(false)
+const lastResult = ref(null)
 
-const regexMatchFieldTypes = [
-  {
-    key: 'vendor',
-    label: 'Vendor',
-    sortable: true,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'category',
-    label: 'Category',
-    sortable: true,
-    sortDirection: 'desc',
-  },
-  {
-    key: 'actions',
-    label: 'Actions',
-  }
-]
+const skipKnown = ref(true)
+const skipRepeats = ref(false)
+const createRules = ref(true)
+const showAllRows = ref(false)
+const rowFilter = ref('all')
 
-function readFiles() {
-  if(files.value.length > 0) {
-    files.value.forEach((file) => {
-      var reader = new FileReader()
-      reader.onload = readFileContent
-      reader.readAsText(file, "UTF-8")
+const compiledRules = computed(() => compileRules(rules.value))
+const knownCategories = computed(() =>
+  [...new Set([...rules.value.map((r) => r.categoryName), ...canonicalCategories])]
+    .filter(Boolean)
+    .sort(),
+)
+
+// ---- context: rules + what is already stored -------------------------------
+function loadContext() {
+  return Promise.all([
+    api.getVendorOverrides(),
+    // All six keys required, null = no filter (the server's OptionalTransaction
+    // has no defaults, so a partial object is a 400).
+    api.getTransactions({
+      vendor: null,
+      amount: null,
+      account: null,
+      category: null,
+      type: null,
+      location: null,
+    }),
+  ]).then(
+    ([vendorRules, transactions]) => {
+      rules.value = vendorRules ?? []
+      existingKeys.value = new Set(
+        (transactions ?? []).map((t) =>
+          duplicateKey({
+            date: t.date,
+            vendor: t.vendor,
+            amount: t.amount,
+            account: t.account,
+          }),
+        ),
+      )
+      contextLoaded.value = true
+    },
+    (failure) => {
+      contextLoaded.value = true
+      toast('Could not load existing data', failure?.message ?? '', 'danger')
+    },
+  )
+}
+
+loadContext()
+
+function toast(title, body, variant = 'success') {
+  show?.({ props: { title, body, variant, pos: 'bottom-right' } })
+}
+
+// ---- file handling ---------------------------------------------------------
+const dragging = ref(false)
+
+function onDrop(event) {
+  dragging.value = false
+  addFiles([...(event.dataTransfer?.files ?? [])])
+}
+
+function onPick(event) {
+  addFiles([...(event.target.files ?? [])])
+  event.target.value = '' // let the same file be re-picked after removal
+}
+
+function addFiles(list) {
+  const csvs = list.filter((f) => /\.csv$/i.test(f.name))
+  if (!csvs.length) {
+    toast('No CSV files', 'Statements need to be exported as CSV.', 'warning')
+    return
+  }
+  for (const file of csvs) {
+    if (files.value.some((f) => f.name === file.name && f.size === file.size)) {
+      toast('Already added', `${file.name} is already in the list.`, 'warning')
+      continue
+    }
+    readFile(file)
+  }
+}
+
+function readFile(file) {
+  const reader = new FileReader()
+  reader.onload = (event) => {
+    // Parsing is pure and returns the account it detected, so several files can
+    // be read at once without fighting over one shared `account` value.
+    const parsed = parseStatement(event.target.result)
+    files.value.push({
+      name: file.name,
+      size: file.size,
+      account: parsed.account,
+      text: event.target.result,
+      rows: parsed.rows.map(applyRules),
+      skipped: parsed.skipped,
     })
   }
+  reader.onerror = () => toast('Could not read file', file.name, 'danger')
+  reader.readAsText(file, 'UTF-8')
 }
 
-function getCategories() {
-  return api.getVendorOverrides().then((vendorCategories) => {
-    categoryList.value = vendorCategories;
-  })
+function removeFile(name) {
+  files.value = files.value.filter((f) => f.name !== name)
 }
 
-getCategories()
-
-function readFileContent(evt) {
-  var fileContent = evt.target.result
-  fileContent.split("\n").forEach((line, index) => {
-    if(line === "" || index ===  0) {
-      if(index === 0) {
-        // Try to dynamically determine the account type so the user doesn't have to set it.
-        const headerRegex = /(.*),(.*),(.*),(.*),(.*),(.*),(.*)/g
-        const headerTokens = headerRegex.exec(line);
-
-        if(headerTokens.length === 0) {
-          show?.({ props: {title: "Unable to parse file.", body: "File format must have changed. Check ImportView.vue", variant: "danger", pos: "bottom-right" }})
-          return;
-        }
-
-        if(headerTokens[5] === "Status") {
-          account.value = "Credit";
-        } else {
-          account.value = "Chequing";
-        }
-      }
-      return
-    }
-
-    if(account.value === "Chequing") {
-      const regex = /(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\")/g
-      const tokens = regex.exec(line);
-
-      if(tokens.length === 0) {
-        show?.({ props: {title: "Unable to parse file.", body: "File format must have changed. Check ImportView.vue", variant: "danger", pos: "bottom-right" }})
-        return;
-      }
-
-      transactionsToImport.value.push(parseChequingTransaction(tokens))
-    } else if(account.value === "Credit") {
-      const regex = /(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\"),(\".*\")/g
-      const tokens = regex.exec(line);
-
-      if(tokens.length === 0) {
-        show?.({ props: {title: "Unable to parse file.", body: "File format must have changed. Check ImportView.vue", variant: "danger", pos: "bottom-right" }})
-        return;
-      }
-
-      transactionsToImport.value.push(parseCreditTransaction(tokens))
-    }
-  })
+/** Re-parse one file as the other account type. */
+function switchAccount(file, account) {
+  const parsed = parseStatement(file.text, { account })
+  file.account = parsed.account
+  file.rows = parsed.rows.map(applyRules)
+  file.skipped = parsed.skipped
 }
 
-function parseChequingTransaction(tokens) {
-  var fullString = tokens[0]
-  var filter = tokens[1]
-  var shortDate = moment(tokens[2].replaceAll('\"', "").trim(), "YYYY-MM-DD").format("YYYY-MM-DDTHH:mm:ss")
-  var type = tokens[3]
-  var purchaseAmount = tokens[6].replaceAll('\"', "")
-  var unknown = tokens[2]
-  if(type !== undefined && type !== null && type !== "") {
-    type = type.replaceAll('\"', "").trim()
-  }
-
-  var vendorString = "Unknown"
-  var locationString = "Unknown"
-  var vendorAndLocation = tokens[4]
-  if(vendorAndLocation !== undefined && vendorAndLocation !== null && vendorAndLocation !== "") {
-    vendorAndLocation = vendorAndLocation.replaceAll('\"', "")
-    vendorString = vendorAndLocation.slice(0, 25).trim()
-    locationString = vendorAndLocation.slice(25, 30).trim()
-
-    if(locationString.includes(" ") || locationString === "") {
-      vendorString += locationString
-      locationString = "Unknown"
+/**
+ * Apply the vendor rules exactly as the importer always has: a match sets the
+ * category AND relabels the vendor, with a type-based fallback.
+ */
+function applyRules(row) {
+  const match = findMatchingRule(compiledRules.value, row.vendor)
+  if (match) {
+    return {
+      ...row,
+      vendor: match.vendor,
+      category: String(match.categoryName ?? '').trim(),
+      matchedRule: match,
     }
   }
+  const type = String(row.type ?? '')
+  let category = row.category ?? ''
+  if (!category && type.includes('Bill Payment')) category = 'Bills'
+  if (!category && type.includes('Payroll Deposit')) category = 'Job'
+  return { ...row, category, matchedRule: null }
+}
 
-  var category = ""
-  var override = checkVendorOverride(vendorString, type)
-
-  if(override.category != null) {
-    category = override.category
+// ---- derived rows ----------------------------------------------------------
+const allRows = computed(() => {
+  const seen = new Map()
+  const out = []
+  for (const file of files.value) {
+    for (const row of file.rows) {
+      const key = duplicateKey(row)
+      const repeat = seen.has(key)
+      seen.set(key, true)
+      out.push({
+        ...row,
+        file: file.name,
+        key,
+        known: existingKeys.value.has(key),
+        repeat,
+        ccPayment: isCreditCardPayment(row),
+      })
+    }
   }
-  if(override.vendorOverride != null) {
-    vendorString = override.vendorOverride
-  }
+  return out
+})
 
+const excluded = (row) =>
+  (skipKnown.value && row.known) || (skipRepeats.value && row.repeat)
+
+const rowsToImport = computed(() => allRows.value.filter((r) => !excluded(r)))
+const uncategorized = computed(() => rowsToImport.value.filter((r) => !r.category))
+
+const stats = computed(() => {
+  const rows = rowsToImport.value
+  const inbound = rows.filter((r) => r.amount > 0).reduce((a, r) => a + r.amount, 0)
+  const outbound = rows.filter((r) => r.amount < 0).reduce((a, r) => a - r.amount, 0)
+  const dates = rows.map((r) => r.date.slice(0, 10)).sort()
   return {
-    date: shortDate,
-    amount: purchaseAmount,
-    type: type,
-    vendor: vendorString,
-    location: locationString,
-    category: category,
-    account: account
-  };
-}
-
-function parseCreditTransaction(tokens) {
-  var shortDate = moment(tokens[2].replaceAll('\"', "").trim(), "YYYY-MM-DD").format("YYYY-MM-DDTHH:mm:ss")
-  var purchaseAmount = tokens[7].replaceAll('\"', "")
-
-  var vendorString = "Unknown"
-  var locationString = "Unknown"
-  var category = "Unknown"
-  var vendorAndLocation = tokens[3]
-
-  if(vendorAndLocation !== undefined && vendorAndLocation !== null && vendorAndLocation !== "") {
-    vendorAndLocation = vendorAndLocation.replaceAll('\"', "")
-
-    if(vendorAndLocation.includes("FROM")) {
-      // This was a transfer. Don't parse and leave as is. There is no location.
-      vendorString = vendorAndLocation
-      category = "Bills"
-    } else {
-      vendorString = vendorAndLocation.slice(0, 25).trim() // 25 Character vendor name.
-      var city = vendorAndLocation.slice(25, 38) // 13 char city name.
-      var province = vendorAndLocation.slice(38, 40).trim() // 3 char province name at end
-
-      var override = checkVendorOverride(vendorString, type)
-
-      if(override.category != null) {
-        category = override.category
-      }
-      if(override.vendorOverride != null) {
-        vendorString = override.vendorOverride
-      }
-
-      if(city.trim() !== "") {
-        locationString = city + ", " + province
-      }
-    }
-  }
-
-  return {
-    date: shortDate,
-    amount: purchaseAmount,
-    type: "",
-    vendor: vendorString,
-    location: locationString,
-    category: category,
-    account: account
-  };
-}
-
-function checkVendorOverride(vendorString, type = "") {
-  var override = {
-    category: null,
-    vendorOverride: null,
-  };
-  // Lookup category...
-  var foundFromList = categoryList.value.filter((it) => {
-    if(it.regexMaybe !== null && it.regexMaybe !== "") {
-      var regex = new RegExp(it.regexMaybe.toUpperCase())
-      return regex.test(vendorString.toUpperCase())
-    } else {
-      return vendorString.toUpperCase() === it.vendor.toUpperCase()
-    }
-  })
-
-  if(foundFromList.length > 0) {
-    override.category = foundFromList[0].categoryName
-    override.vendorOverride = foundFromList[0].vendor
-  } else {
-    if(type.includes("Bill Payment")) {
-      override.category = "Bills"
-    } else if (type.includes("Payroll Deposit")) {
-      override.category = "Job"
-    }
-  }
-  return override;
-}
-
-const newCategory = ref({})
-const createCategoryModal = ref(false)
-function addCategoryModal(item) {
-  // Ignoring this for now...
-  // There's gotta be a better way that is more user friendly.
-
-  // newCategory.value = {
-  //   vendor: item.vendor,
-  //   category: item.category,
-  //   regexMaybe: ""
-  // }
-  // createCategoryModal.value = true
-}
-
-function createCategory() {
-  api.addVendor(newCategory.value).then(
-      (success) => {
-        show?.({ props: {title: "Successfully created Category", body: "Created category (" + newCategory.value.vendor + " -> " + newCategory.value.category + ")", variant: "success", pos: "bottom-right" }})
-
-        // Update any transactions in the list matching the vendor to have the new category.
-        var updatedTransactions = 0
-        transactionsToImport.value.forEach((transaction) => {
-          if(transaction.vendor === newCategory.value.vendor) {
-            transaction.category = newCategory.value.category
-            updatedTransactions += 1
-          }
-        })
-        show?.({ props: {title: "Import Updated", body: updatedTransactions.toString() + " transactions were updated with the new vendor.", variant: "success", pos: "bottom-right" }})
-        newCategory.value = {
-          vendor: "",
-          category: ""
-        }
-      }, (failure) => {
-        show?.({ props: {title: "Failed to create Category", body: failure.message, variant: "danger", pos: "bottom-right" }})
-      }
-  )
-}
-
-function importTransactions() {
-  var data = {
-    transactions: transactionsToImport.value
-  }
-  api.importTransactions(data).then(
-      (success) => {
-        show?.({ props: {title: "Successful import.", body: "Imported " + transactionsToImport.value.length + " transactions.", variant: "success", pos: "bottom-right" }})
-        transactionsToImport.value = []
-        files.value = []
-      }, (failure) => {
-        show?.({ props: {title: "Failed to import " + transactionsToImport.value.length + " transactions.", body: failure.message, variant: "danger", pos: "bottom-right" }})
-      }
-  )
-}
-
-function checkUnknown(transaction) {
-  return transaction.category !== null && transaction.category !== "Unknown" && transaction.category !== ""
-}
-
-const validateRegex = computed(() => {
-  var regex = getRegexp()
-  if(regex !== null) {
-    return regex.test(regexTest.value.toUpperCase())
-  } else {
-    return false
+    parsed: allRows.value.length,
+    toImport: rows.length,
+    known: allRows.value.filter((r) => r.known).length,
+    repeats: allRows.value.filter((r) => r.repeat).length,
+    ccPayments: rows.filter((r) => r.ccPayment).length,
+    skippedLines: files.value.reduce((a, f) => a + f.skipped.length, 0),
+    inbound,
+    outbound,
+    from: dates[0],
+    to: dates[dates.length - 1],
+    willStore: rows.length - rows.filter((r) => r.ccPayment).length,
   }
 })
 
-function getExistingMatchingCategories() {
-  var regex = getRegexp()
+/** Distinct vendors needing a category - the actual unit of work. */
+const vendorsNeedingCategory = computed(() => {
+  const groups = new Map()
+  for (const row of uncategorized.value) {
+    const key = vendorKeyOf(row.vendor)
+    const entry = groups.get(key) ?? { key, vendor: row.vendor, rows: [], total: 0 }
+    entry.rows.push(row)
+    entry.total += row.amount
+    groups.set(key, entry)
+  }
+  return [...groups.values()].sort((a, b) => b.rows.length - a.rows.length)
+})
 
-  if(regex !== null) {
-    matchingExistingCategories.value = categoryList.value
-        .filter((it) => regex.test(it.vendor.toUpperCase()))
-  } else {
-    matchingExistingCategories.value = []
+/** Vendors in this batch with no rule yet - candidates for being remembered. */
+const newVendorCandidates = computed(() => {
+  const existing = new Set(compiledRules.value.map((r) => r.key))
+  const groups = new Map()
+  for (const row of rowsToImport.value) {
+    const key = vendorKeyOf(row.vendor)
+    if (existing.has(key) || groups.has(key)) continue
+    groups.set(key, { vendor: row.vendor, category: row.category })
+  }
+  return [...groups.values()]
+})
+
+/** Only those that have a category are worth saving as a rule. */
+const newVendors = computed(() => newVendorCandidates.value.filter((v) => v.category))
+
+/** Set a category on every row for one vendor, across all loaded files. */
+function setVendorCategory(vendorKey, category) {
+  const value = String(category ?? '').trim()
+  for (const file of files.value) {
+    for (const row of file.rows) {
+      if (vendorKeyOf(row.vendor) === vendorKey) row.category = value
+    }
   }
 }
 
-function getRegexp() {
-  var matchRegex = newCategory.value.regexMaybe
+function setRowCategory(row, category) {
+  const value = String(category ?? '').trim()
+  for (const file of files.value) {
+    for (const candidate of file.rows) {
+      if (candidate === row.source) candidate.category = value
+    }
+  }
+}
 
-  if(matchRegex !== undefined && matchRegex !== null && matchRegex !== "") {
-    return new RegExp(matchRegex.toUpperCase(), 'g')
-  } else {
-    return null
+const visibleRows = computed(() => {
+  if (rowFilter.value === 'needs') return allRows.value.filter((r) => !r.category && !excluded(r))
+  if (rowFilter.value === 'known') return allRows.value.filter((r) => r.known)
+  if (rowFilter.value === 'matched') return allRows.value.filter((r) => r.matchedRule)
+  return allRows.value
+})
+
+const rowFields = [
+  { key: 'date', label: 'Date', sortable: true },
+  { key: 'vendor', label: 'Vendor', sortable: true },
+  { key: 'category', label: 'Category' },
+  { key: 'type', label: 'Type', sortable: true },
+  { key: 'amount', label: 'Amount', sortable: true },
+  { key: 'state', label: '' },
+]
+
+const tableItems = computed(() =>
+  visibleRows.value.map((r) => ({
+    date: r.date.slice(0, 10),
+    vendor: r.vendor,
+    category: r.category,
+    type: r.type || '—',
+    amount: r.amount,
+    known: r.known,
+    repeat: r.repeat,
+    ccPayment: r.ccPayment,
+    matchedRule: r.matchedRule,
+    excluded: excluded(r),
+    source: findSource(r),
+  })),
+)
+
+/** The mutable row inside `files` that a derived row came from. */
+function findSource(row) {
+  const file = files.value.find((f) => f.name === row.file)
+  return file?.rows.find(
+    (r) => r.date === row.date && r.amount === row.amount && r.vendor === row.vendor,
+  )
+}
+
+// ---- import ----------------------------------------------------------------
+const canImport = computed(
+  () => contextLoaded.value && !importing.value && rowsToImport.value.length > 0,
+)
+
+async function runImport() {
+  const rows = rowsToImport.value
+  if (!rows.length) return
+  importing.value = true
+  lastResult.value = null
+
+  const payload = {
+    transactions: rows.map((r) => ({
+      date: r.date,
+      amount: Number(r.amount),
+      type: r.type ?? '',
+      vendor: r.vendor,
+      location: r.location ?? 'Unknown',
+      category: r.category || 'Unknown',
+      account: r.account,
+    })),
+  }
+
+  try {
+    const response = await api.importTransactions(payload)
+    const stored = response?.data?.insertedIds?.length ?? null
+
+    let rulesCreated = 0
+    if (createRules.value && newVendors.value.length) {
+      // One rule per new vendor - not one per transaction.
+      for (const vendor of newVendors.value) {
+        try {
+          await api.addVendor({ vendor: vendor.vendor, category: vendor.category, regexMaybe: null })
+          rulesCreated++
+        } catch {
+          /* a failed rule should not fail the import */
+        }
+      }
+    }
+
+    lastResult.value = { sent: payload.transactions.length, stored, rulesCreated }
+    files.value = []
+    await loadContext()
+    toast('Import complete', `${stored ?? payload.transactions.length} transactions stored.`)
+  } catch (failure) {
+    toast('Import failed', failure?.message ?? 'Unknown error', 'danger')
+  } finally {
+    importing.value = false
   }
 }
 </script>
 
 <template>
-  <BContainer>
-
-    <BCard class="p-3">
-      <h2>Import Bank Statement</h2>
-
-      <BButton
-          v-b-toggle.collapse-1
-          variant="primary"
-      >Need Help?</BButton
-      >
-
-      <BCollapse id="collapse-1">
-        <BCard class="mt-4">
-          <h1>How to import bank statement</h1>
-
-          <p>To use this applicaiton, currently you must be using Scotiabank.</p>
-
-          <ul>
-            <li>Login to Scotiabank</li>
-            <li>Click to view one of your accounts</li>
-            <li>Filter to a single month</li>
-            <BAlert :model-value="true" variant="info">
-              Ensure that you do not have "Current statement period" selected.
-              Select a month.
-
-              DO NOT select the current month, as the month is not over, and the application does not filter out duplicate transactions.
-              Thus, you should only import previous months.
-            </BAlert>
-            <li>Download as a CSV</li>
-            <li>Select your account type below (Credit or Chequing)</li>
-            <li>Click "Choose" and import the downloaded CSV here!</li>
-          </ul>
-
-          Once imported, you will be able to see a list of all of your transactions.
-          However, many of them will likely have red "Unknown" categories.
-          Give these transactions a category!
-
-          <BAlert :model-value="true" variant="info">
-            This will get easier as you import more transactions.
-            The app will remember which categories match which vendors so on future imports, they will get automatically assigned.
-          </BAlert>
-
-          Once you have categorized all of your transactions, click the "Import" button.
-
-          Repeat this for each month that you want to import.
-          I recommend importing as much data as possible to get a wholistic view of your finances.
-
-          Once complete, return to the home page and select the time-range that will include your transactions.
-        </BCard>
+  <main class="import-page">
+    <BCard class="panel mb-3" body-class="p-3 p-md-4">
+      <h2 class="page-title mb-1">Import statements</h2>
+      <p class="page-subtitle mb-0">
+        Export a month as CSV from Scotiabank and drop it below. Rows already in your database are
+        detected, so re-importing a month is safe.
+      </p>
+      <BButton v-b-toggle.import-help size="sm" variant="outline-secondary" class="mt-2">
+        How to export from your bank
+      </BButton>
+      <BCollapse id="import-help">
+        <ol class="help-list mt-3 mb-0">
+          <li>Log in to Scotiabank and open an account.</li>
+          <li>Filter to a single month — not “Current statement period”.</li>
+          <li>Download as CSV, then drop the file here.</li>
+        </ol>
+        <p class="help-note mb-0">
+          Chequing and credit exports have different columns; the account is detected from the
+          file's header and can be overridden per file.
+        </p>
       </BCollapse>
-
-      <BRow class="p-3">
-        <BCol>
-          <BDropdown :text="account">
-            <BDropdownItem @click="value => account = value.target.innerText">Chequing</BDropdownItem>
-            <BDropdownItem @click="value => account = value.target.innerText">Credit</BDropdownItem>
-          </BDropdown>
-        </BCol>
-        <BCol cols="9">
-          <BFormFile v-model="files" multiple accept="text/csv" @update:modelValue="readFiles"/>
-        </BCol>
-      </BRow>
     </BCard>
 
-    <BModal
-        v-model="createCategoryModal"
-        id="modal-center"
-        centered
-        title="New Category"
-        cancel-title="Cancel"
-        cancel-variant="danger"
-        ok-title="Create"
-        ok-variant="success"
-        @ok="createCategory">
-      <BForm>
-        <BFormGroup
-            class="p-2 m-2"
-            id="input-vendor-regex"
-            label-for="vendorName"
-        >
-          <BInputGroup prepend="Vendor Regex">
-            <BFormInput
-                id="vendorName"
-                v-model="newCategory.vendor"
-                type="text"
-                placeholder="Vendor"
-                required
-            />
-          </BInputGroup>
-        </BFormGroup>
-
-        <BInputGroup prepend="Category" class="p-2 m-2">
-          <BFormInput
-              id="category"
-              v-model="newCategory.category"
-              type="text"
-              placeholder="Category"
-              required
-          />
-        </BInputGroup>
-
-        <BInputGroup prepend="Optional Regex" class="p-2 m-2">
-          <BFormInput
-              id="regex"
-              v-model="newCategory.regexMaybe"
-              type="text"
-              placeholder="Regex"
-              required
-              @change="getExistingMatchingCategories"
-          />
-        </BInputGroup>
-
-        <BInputGroup prepend="Regex Test String" class="p-2 m-2">
-          <BFormInput
-              id="regexTest"
-              v-model="regexTest"
-              type="text"
-              placeholder="Regex Test String"
-              required
-              :state="validateRegex"
-          />
-
-        </BInputGroup>
-
-        <BTable
-            :key="matchingExistingCategories"
-            :items="matchingExistingCategories"
-            :fields="regexMatchFieldTypes"
-            emptyText="No existing categories match"
-        >
-          <template #cell(actions)="row">
-            <BButton size="sm" @click="deleteVendor(row.item)" variant="danger">Delete</BButton>
-          </template>
-        </BTable>
-      </BForm>
-    </BModal>
-
-    <div class="mt-3">
-      Files: <strong>{{ files.map((file) => file.name).join(",") }}</strong>
-      <BPagination
-          v-model="currentPage"
-          :total-rows="transactionsToImport.length"
-          :per-page="perPage"
-          class="justify-content-center"
-          first-number
-          last-number
-          :limit="5"
-      />
-      <BTable
-          :key="transactionsToImport.length"
-          :sort-by="[{key: 'date', order: 'desc'}]"
-          :items="transactionsToImport"
-          :fields="fields"
-          :per-page="perPage"
-          :current-page="currentPage"
-          :sortInternal="false"
-          emptyText="No data">
-        <template #cell(category)="row">
-          <BFormInput
-              v-model="row.item.category"
-              type="text"
-              @blur="addCategoryModal(row.item)"
-              :state="checkUnknown(row.item)"
-          />
-          <BFormInvalidFeedback :state="checkUnknown(row.item)">
-            Unknown Category
-          </BFormInvalidFeedback>
-        </template>
-      </BTable>
-      <BPagination
-          v-model="currentPage"
-          :total-rows="transactionsToImport.length"
-          :per-page="perPage"
-          class="justify-content-center"
-          first-number
-          last-number
-          :limit="5"
-      />
+    <!-- ---------- drop zone ---------- -->
+    <div
+      class="dropzone"
+      :class="{ dragging }"
+      @dragover.prevent="dragging = true"
+      @dragleave.prevent="dragging = false"
+      @drop.prevent="onDrop"
+    >
+      <p class="drop-title mb-1">Drop CSV statements here</p>
+      <p class="drop-sub mb-2">or</p>
+      <label class="btn btn-primary btn-sm mb-0">
+        Choose files
+        <input type="file" accept=".csv,text/csv" multiple hidden @change="onPick" />
+      </label>
+      <p v-if="!contextLoaded" class="drop-sub mt-2 mb-0">
+        <BSpinner small /> Loading your rules and existing transactions…
+      </p>
     </div>
 
-    <BButton @click="importTransactions" variant="success">Import</BButton>
-  </BContainer>
+    <!-- ---------- per-file results ---------- -->
+    <div v-if="files.length" class="file-list">
+      <div v-for="file in files" :key="file.name" class="file-card">
+        <div class="file-head">
+          <div>
+            <span class="file-name">{{ file.name }}</span>
+            <span class="file-meta">
+              {{ file.rows.length }} rows
+              <template v-if="file.skipped.length">
+                · <span class="warn">{{ file.skipped.length }} unreadable</span>
+              </template>
+            </span>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <BFormSelect
+              :model-value="file.account"
+              size="sm"
+              style="width: auto"
+              @update:model-value="switchAccount(file, $event)"
+            >
+              <option v-for="a in ACCOUNTS" :key="a" :value="a">{{ a }}</option>
+            </BFormSelect>
+            <BButton size="sm" variant="outline-danger" @click="removeFile(file.name)">Remove</BButton>
+          </div>
+        </div>
+        <details v-if="file.skipped.length" class="skipped">
+          <summary>{{ file.skipped.length }} lines could not be read</summary>
+          <ul>
+            <li v-for="s in file.skipped" :key="s.line">
+              <strong>Line {{ s.line }}:</strong> {{ s.reason }}
+              <code>{{ s.text }}</code>
+            </li>
+          </ul>
+        </details>
+      </div>
+    </div>
+
+    <!-- ---------- review ---------- -->
+    <template v-if="allRows.length">
+      <BCard class="panel my-3" body-class="p-3 p-md-4">
+        <h3 class="section-title mb-3">Ready to import</h3>
+        <div class="stat-row">
+          <div class="stat">
+            <span class="stat-value">{{ stats.toImport }}</span>
+            <span class="stat-label">will be imported</span>
+          </div>
+          <div class="stat" :class="{ warn: stats.known > 0 }">
+            <span class="stat-value">{{ stats.known }}</span>
+            <span class="stat-label">already in database</span>
+          </div>
+          <div class="stat" :class="{ warn: uncategorized.length > 0 }">
+            <span class="stat-value">{{ uncategorized.length }}</span>
+            <span class="stat-label">need a category</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value out">{{ money(stats.outbound) }}</span>
+            <span class="stat-label">out</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value in">{{ money(stats.inbound) }}</span>
+            <span class="stat-label">in</span>
+          </div>
+        </div>
+        <p class="range-line mb-0" v-if="stats.from">{{ stats.from }} → {{ stats.to }}</p>
+
+        <div class="toggles">
+          <BFormCheckbox v-model="skipKnown" switch>
+            Skip the {{ stats.known }} rows already in my database
+          </BFormCheckbox>
+          <BFormCheckbox v-if="stats.repeats" v-model="skipRepeats" switch>
+            Skip {{ stats.repeats }} repeats within these files
+          </BFormCheckbox>
+          <BFormCheckbox v-if="newVendorCandidates.length" v-model="createRules" switch>
+            Remember new vendors as rules
+            <span class="toggle-hint">
+              {{ newVendors.length }} of {{ newVendorCandidates.length }}
+              {{ newVendorCandidates.length === 1 ? 'new vendor has' : 'new vendors have' }} a
+              category and will be saved
+            </span>
+          </BFormCheckbox>
+        </div>
+
+        <BAlert v-if="stats.ccPayments" :model-value="true" variant="info" class="mt-3 mb-0 py-2 text-start">
+          {{ stats.ccPayments }} credit-card payment
+          {{ stats.ccPayments === 1 ? 'row' : 'rows' }} will not be stored — the server matches each
+          one against the chequing transfer that paid it, so the purchases are not double-counted.
+          Expect <strong>{{ stats.willStore }}</strong> transactions to land.
+        </BAlert>
+      </BCard>
+
+      <!-- ---------- categorise by vendor ---------- -->
+      <BCard v-if="vendorsNeedingCategory.length" class="panel mb-3" body-class="p-3 p-md-4">
+        <h3 class="section-title mb-1">
+          {{ vendorsNeedingCategory.length }}
+          {{ vendorsNeedingCategory.length === 1 ? 'vendor needs' : 'vendors need' }} a category
+        </h3>
+        <p class="section-subtitle mb-3">
+          Setting one here applies to every row for that vendor. The rest were categorised
+          automatically by your existing rules.
+        </p>
+        <ul class="vendor-list">
+          <li v-for="v in vendorsNeedingCategory" :key="v.key">
+            <span class="v-name">{{ v.vendor }}</span>
+            <span class="v-meta">
+              {{ v.rows.length }} {{ v.rows.length === 1 ? 'row' : 'rows' }} ·
+              {{ money(Math.abs(v.total)) }}
+            </span>
+            <BFormInput
+              list="import-category-list"
+              size="sm"
+              class="v-input"
+              placeholder="Category"
+              @change="setVendorCategory(v.key, $event)"
+            />
+          </li>
+        </ul>
+      </BCard>
+
+      <!-- ---------- all rows ---------- -->
+      <BCard class="panel mb-3" body-class="p-3 p-md-4">
+        <div class="d-flex justify-content-between align-items-center gap-3 mb-3 flex-wrap">
+          <h3 class="section-title mb-0">Transactions</h3>
+          <div class="d-flex align-items-center gap-2">
+            <BButtonGroup size="sm">
+              <BButton
+                v-for="f in [
+                  { id: 'all', label: `All (${allRows.length})` },
+                  { id: 'needs', label: `Needs category (${uncategorized.length})` },
+                  { id: 'matched', label: 'Auto-categorised' },
+                  { id: 'known', label: `Already imported (${stats.known})` },
+                ]"
+                :key="f.id"
+                :variant="rowFilter === f.id ? 'secondary' : 'outline-secondary'"
+                @click="rowFilter = f.id"
+              >
+                {{ f.label }}
+              </BButton>
+            </BButtonGroup>
+            <BButton size="sm" variant="outline-secondary" @click="showAllRows = !showAllRows">
+              {{ showAllRows ? 'Hide' : 'Show' }} table
+            </BButton>
+          </div>
+        </div>
+
+        <BTable
+          v-if="showAllRows"
+          :items="tableItems"
+          :fields="rowFields"
+          :sort-by="[{ key: 'date', order: 'desc' }]"
+          small
+          striped
+          responsive
+          show-empty
+          empty-text="Nothing matches this filter."
+          class="mb-0 import-table"
+        >
+          <template #cell(category)="row">
+            <div class="cat-cell">
+              <span class="swatch" :style="{ background: getCategoryColor(row.item.category) }" />
+              <BFormInput
+                :model-value="row.item.category"
+                list="import-category-list"
+                size="sm"
+                placeholder="Uncategorized"
+                :state="row.item.category ? null : false"
+                @change="setRowCategory(row.item, $event)"
+              />
+            </div>
+          </template>
+          <template #cell(amount)="row">
+            <span class="amount" :class="row.item.amount > 0 ? 'in' : 'out'">
+              {{ row.item.amount > 0 ? '↑' : '↓' }} {{ money(Math.abs(row.item.amount)) }}
+            </span>
+          </template>
+          <template #cell(state)="row">
+            <span v-if="row.item.known" class="tag known" title="Already in your database">
+              already imported
+            </span>
+            <span v-else-if="row.item.repeat" class="tag" title="Appears more than once in these files">
+              repeat
+            </span>
+            <span
+              v-else-if="row.item.ccPayment"
+              class="tag"
+              title="The server reconciles this against your chequing transfer instead of storing it"
+            >
+              not stored
+            </span>
+            <span
+              v-else-if="row.item.matchedRule"
+              class="tag matched"
+              :title="`Matched rule: ${row.item.matchedRule.vendor}${
+                row.item.matchedRule.pattern ? ` (${row.item.matchedRule.pattern})` : ''
+              }`"
+            >
+              auto
+            </span>
+          </template>
+        </BTable>
+        <p v-else class="section-subtitle mb-0">
+          {{ allRows.length }} rows parsed. Open the table to check or change individual rows.
+        </p>
+      </BCard>
+
+      <!-- ---------- action ---------- -->
+      <BCard class="panel" body-class="p-3 p-md-4">
+        <div class="d-flex align-items-center gap-3 flex-wrap">
+          <BButton variant="success" size="lg" :disabled="!canImport" @click="runImport">
+            <BSpinner v-if="importing" small />
+            Import {{ stats.toImport }} {{ stats.toImport === 1 ? 'transaction' : 'transactions' }}
+          </BButton>
+          <span v-if="uncategorized.length" class="hint">
+            {{ uncategorized.length }} rows will be stored as <strong>Unknown</strong> — you can fix
+            them later from the Transactions page.
+          </span>
+        </div>
+      </BCard>
+    </template>
+
+    <BCard v-else-if="lastResult" class="panel mt-3" body-class="p-3 p-md-4">
+      <h3 class="section-title mb-2">Import complete</h3>
+      <ul class="result-list mb-0">
+        <li>{{ lastResult.sent }} rows sent</li>
+        <li v-if="lastResult.stored !== null">
+          <strong>{{ lastResult.stored }}</strong> transactions stored
+          <span v-if="lastResult.stored !== lastResult.sent" class="hint">
+            (the difference is credit-card payments, reconciled against your chequing transfers)
+          </span>
+        </li>
+        <li v-if="lastResult.rulesCreated">{{ lastResult.rulesCreated }} new vendor rules created</li>
+      </ul>
+    </BCard>
+
+    <datalist id="import-category-list">
+      <option v-for="c in knownCategories" :key="c" :value="c" />
+    </datalist>
+  </main>
 </template>
 
 <style scoped>
+.import-page {
+  padding: 0 0.5rem 3rem;
+}
 
+.panel {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.page-title {
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.page-subtitle,
+.section-subtitle {
+  font-size: 0.875rem;
+  color: #c3c2b7;
+  max-width: 80ch;
+}
+
+.section-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #ffffff;
+  text-align: left;
+}
+
+.help-list {
+  font-size: 0.875rem;
+  color: #c3c2b7;
+  padding-left: 1.25rem;
+}
+
+.help-note {
+  font-size: 0.8125rem;
+  color: #898781;
+  margin-top: 0.5rem;
+}
+
+.dropzone {
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border-radius: 0.5rem;
+  padding: 1.75rem 1rem;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.02);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.dropzone.dragging {
+  border-color: #3987e5;
+  background: rgba(57, 135, 229, 0.08);
+}
+
+.drop-title {
+  font-size: 1rem;
+  color: #ffffff;
+}
+
+.drop-sub {
+  font-size: 0.8125rem;
+  color: #898781;
+}
+
+.file-list {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.file-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.5rem;
+  padding: 0.625rem 0.875rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.file-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.file-name {
+  font-size: 0.9375rem;
+  color: #ffffff;
+  margin-right: 0.5rem;
+}
+
+.file-meta {
+  font-size: 0.8125rem;
+  color: #898781;
+}
+
+.warn {
+  color: #fab219;
+}
+
+.skipped {
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+  color: #c3c2b7;
+}
+
+.skipped summary {
+  cursor: pointer;
+  color: #fab219;
+}
+
+.skipped ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.skipped code {
+  display: block;
+  color: #898781;
+  font-size: 0.75rem;
+  margin-top: 0.1rem;
+}
+
+.stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.stat {
+  flex: 1 1 130px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.4rem;
+  background: rgba(255, 255, 255, 0.02);
+  text-align: left;
+}
+
+.stat.warn {
+  border-color: rgba(250, 178, 25, 0.4);
+}
+
+.stat-value {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: #898781;
+}
+
+.range-line {
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+  color: #898781;
+  font-variant-numeric: tabular-nums;
+}
+
+.toggle-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: #898781;
+}
+
+.toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.875rem;
+  font-size: 0.875rem;
+}
+
+.vendor-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.vendor-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.v-name {
+  flex: 1 1 auto;
+  font-size: 0.9375rem;
+  color: #ffffff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-meta {
+  font-size: 0.75rem;
+  color: #898781;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.v-input {
+  flex: 0 0 220px;
+}
+
+.import-table :deep(td),
+.import-table :deep(th) {
+  font-size: 0.875rem;
+  vertical-align: middle;
+}
+
+.cat-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 200px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.amount {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.in {
+  color: #3987e5;
+}
+
+.out {
+  color: #e66767;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  color: #898781;
+  cursor: help;
+  white-space: nowrap;
+}
+
+.tag.known {
+  background: rgba(250, 178, 25, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(250, 178, 25, 0.45);
+  color: #ffffff;
+}
+
+.tag.matched {
+  background: rgba(12, 163, 12, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(12, 163, 12, 0.4);
+  color: #ffffff;
+}
+
+.hint {
+  font-size: 0.8125rem;
+  color: #898781;
+}
+
+.result-list {
+  list-style: none;
+  padding: 0;
+  font-size: 0.9375rem;
+  color: #c3c2b7;
+}
+
+.result-list li {
+  padding: 0.15rem 0;
+}
 </style>

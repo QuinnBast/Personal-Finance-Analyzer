@@ -104,7 +104,9 @@ class IndexedDBFinanceProvider extends FinanceProvider {
         return new Promise((resolve, reject) => {
             const transaction = this.db.transaction(["vendorCategories"], "readwrite");
             const store = transaction.objectStore("vendorCategories");
-            const request = store.add(vendorData);
+
+            const vendor = this.vendorToExternalModel(vendorData);
+            const request = store.add(vendor);
 
             request.onsuccess = () => resolve({
                 insertId: request.result,
@@ -207,8 +209,13 @@ class IndexedDBFinanceProvider extends FinanceProvider {
             const store = transaction.objectStore("vendorCategories");
             const request = store.getAll();
 
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                resolve(request.result);
+            };
+
+            request.onerror = () => {
+                reject(request.error);
+            };
         });
     }
 
@@ -291,7 +298,7 @@ class IndexedDBFinanceProvider extends FinanceProvider {
     }
 
     vendorToExternalModel(vendor) {
-        if (vendor.category === undefined || transaction.category === "" ) {
+        if (vendor.category === undefined || vendor.category === "" ) {
             vendor.category = "Unknown";
         }
 
@@ -300,6 +307,36 @@ class IndexedDBFinanceProvider extends FinanceProvider {
             categoryName: vendor.category,
             regexMaybe: vendor.regexMaybe
         };
+    }
+
+    fixOptionalTransaction(optionalTransaction) {
+        if(optionalTransaction.vendor === "") {
+            optionalTransaction.vendor = null
+        }
+        if(optionalTransaction.amount === "") {
+            optionalTransaction.amount = null
+        }
+        if(optionalTransaction.account === "") {
+            optionalTransaction.account = null
+        }
+        if(optionalTransaction.category === "") {
+            optionalTransaction.categoryOverride = null
+        } else {
+            optionalTransaction.categoryOverride = optionalTransaction.category
+        }
+        optionalTransaction.category = undefined
+
+        if(optionalTransaction.type === "") {
+            optionalTransaction.purchaseType = null
+        } else {
+            optionalTransaction.purchaseType = optionalTransaction.type
+        }
+        optionalTransaction.type = undefined
+
+        if(optionalTransaction.location === "") {
+            optionalTransaction.location = null
+        }
+        return optionalTransaction
     }
 }
 
