@@ -9,15 +9,18 @@
  * filtered in the browser: instant, case-insensitive, and it can express things
  * the old query could not (amount ranges, date ranges, kind, family).
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'bootstrap-vue-next'
 import api from '@/utils/apiProvider.js'
-import { FAMILIES, OTHER_FAMILY, prepare } from '@/utils/analytics.js'
+import { FAMILIES, ISSUE_TESTS, OTHER_FAMILY, duplicateRows, prepare } from '@/utils/analytics.js'
 import { categories } from '@/utils/categoryColors.js'
 import { money } from '@/utils/format.js'
 import TransactionTable from '@/components/TransactionTable.vue'
 
 const { show } = useToast()
+const route = useRoute()
+const router = useRouter()
 
 const rawTransactions = ref([])
 const loading = ref(false)
@@ -32,6 +35,18 @@ const minAmount = ref('')
 const maxAmount = ref('')
 const dateFrom = ref('')
 const dateTo = ref('')
+/** Exact raw category name, used when merging case-variant spellings. */
+const categoryName = ref('')
+/** A data-quality issue to isolate: uncategorized | duplicates | blank-type | reversals. */
+const issue = ref('all')
+
+const ISSUES = [
+  { value: 'all', label: 'No issue filter' },
+  { value: 'uncategorized', label: 'Uncategorized' },
+  { value: 'duplicates', label: 'Possible duplicates' },
+  { value: 'blank-type', label: 'No purchase type' },
+  { value: 'reversals', label: 'Holds & refunds' },
+]
 
 const KINDS = [
   { value: 'all', label: 'All kinds' },
@@ -42,6 +57,52 @@ const KINDS = [
 ]
 
 const allRows = computed(() => prepare(rawTransactions.value))
+
+/**
+ * Filters live in the URL, so the dashboard's "fix these" buttons can deep-link
+ * straight to the flagged rows and any view stays bookmarkable.
+ */
+const FILTER_REFS = {
+  q: search,
+  account: accountFilter,
+  family: familyFilter,
+  kind: kindFilter,
+  min: minAmount,
+  max: maxAmount,
+  from: dateFrom,
+  to: dateTo,
+  category: categoryName,
+  issue,
+}
+const DEFAULTS = { account: 'all', family: 'all', kind: 'all', issue: 'all' }
+
+function readQuery() {
+  for (const [key, target] of Object.entries(FILTER_REFS)) {
+    const v = route.query[key]
+    if (v != null) target.value = String(v)
+  }
+}
+readQuery()
+watch(() => route.query, readQuery)
+
+let syncing = false
+watch(
+  Object.values(FILTER_REFS),
+  () => {
+    if (syncing) return
+    syncing = true
+    const query = {}
+    for (const [key, target] of Object.entries(FILTER_REFS)) {
+      const v = String(target.value ?? '')
+      if (v && v !== (DEFAULTS[key] ?? '')) query[key] = v
+    }
+    router.replace({ query }).finally(() => {
+      syncing = false
+    })
+  },
+)
+
+const duplicates = computed(() => duplicateRows(allRows.value))
 const accounts = computed(() => [...new Set(allRows.value.map((r) => r.account))].sort())
 
 const activeFilterCount = computed(
@@ -55,6 +116,8 @@ const activeFilterCount = computed(
       maxAmount.value,
       dateFrom.value,
       dateTo.value,
+      categoryName.value,
+      issue.value !== 'all',
     ].filter(Boolean).length,
 )
 
@@ -67,6 +130,8 @@ function clearFilters() {
   maxAmount.value = ''
   dateFrom.value = ''
   dateTo.value = ''
+  categoryName.value = ''
+  issue.value = 'all'
 }
 
 const filtered = computed(() => {
@@ -76,8 +141,18 @@ const filtered = computed(() => {
   const from = dateFrom.value ? new Date(`${dateFrom.value}T00:00:00`).getTime() : null
   const to = dateTo.value ? new Date(`${dateTo.value}T23:59:59`).getTime() : null
 
+  const wantCategory = categoryName.value.trim().toLowerCase()
+
   return allRows.value.filter((r) => {
     if (accountFilter.value !== 'all' && r.account !== accountFilter.value) return false
+    if (wantCategory && String(r.category ?? '').trim().toLowerCase() !== wantCategory) return false
+    if (issue.value !== 'all') {
+      if (issue.value === 'duplicates') {
+        if (!duplicates.value.has(r)) return false
+      } else if (ISSUE_TESTS[issue.value] && !ISSUE_TESTS[issue.value](r)) {
+        return false
+      }
+    }
     if (kindFilter.value !== 'all' && r.flow !== kindFilter.value) return false
     if (familyFilter.value !== 'all') {
       const family = FAMILIES.includes(r.family) ? r.family : OTHER_FAMILY
@@ -244,6 +319,13 @@ function updateAllTransactions() {
         </label>
 
         <label class="field">
+          <span class="field-label">Needs attention</span>
+          <BFormSelect v-model="issue" size="sm">
+            <option v-for="i in ISSUES" :key="i.value" :value="i.value">{{ i.label }}</option>
+          </BFormSelect>
+        </label>
+
+        <label class="field">
           <span class="field-label">Category</span>
           <BFormSelect v-model="familyFilter" size="sm">
             <option value="all">All categories</option>
@@ -277,6 +359,15 @@ function updateAllTransactions() {
           <span class="field-label">Date to</span>
           <BFormInput v-model="dateTo" type="date" size="sm" />
         </label>
+      </div>
+
+      <div v-if="categoryName" class="exact-category">
+        Showing only the exact category
+        <code>{{ categoryName }}</code>
+        <BButton size="sm" variant="outline-secondary" @click="categoryName = ''">Clear</BButton>
+        <span class="hint">
+          Use <strong>Bulk-edit</strong> below to rename these to the spelling you want to keep.
+        </span>
       </div>
 
       <div class="filter-footer">
@@ -406,6 +497,23 @@ function updateAllTransactions() {
 .pair {
   display: flex;
   gap: 0.375rem;
+}
+
+.exact-category {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+  font-size: 0.875rem;
+  color: #c3c2b7;
+}
+
+.exact-category code {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
 }
 
 .filter-footer {

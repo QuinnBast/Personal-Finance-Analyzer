@@ -115,6 +115,35 @@ watch(
   { immediate: true },
 )
 
+// ---- data-quality actions --------------------------------------------------
+/**
+ * Where each issue can actually be fixed. The Transactions page reads these
+ * filters from the URL, so the link lands on exactly the flagged rows and its
+ * bulk-edit can correct them in one pass.
+ */
+const FIX_ACTIONS = computed(() => {
+  // Carry the dashboard's range across, so the count on the button matches the
+  // count on the page you land on.
+  const from = rangeStart.value ? new Date(rangeStart.value).toISOString().slice(0, 10) : undefined
+  const link = (issue) => ({ path: '/transactions', query: from ? { issue, from } : { issue } })
+  return {
+    uncategorized: { label: 'Categorise these', to: link('uncategorized') },
+    'blank-type': { label: 'Review these', to: link('blank-type') },
+    duplicates: { label: 'Review these', to: link('duplicates') },
+  }
+})
+
+const categoryLink = (name) => {
+  const from = rangeStart.value ? new Date(rangeStart.value).toISOString().slice(0, 10) : undefined
+  return { path: '/transactions', query: from ? { category: name, from } : { category: name } }
+}
+
+/** Issues with nothing to fix - said plainly rather than offering a dead button. */
+const NO_FIX = {
+  reversals: 'handled automatically',
+  'category-case': 'pick a spelling below',
+}
+
 // ---- transaction table -----------------------------------------------------
 // prepare() returns oldest-first; the history reads newest-first.
 const recentFirst = computed(() => rows.value.slice().reverse())
@@ -269,9 +298,6 @@ getTransactions()
         </BCol>
       </BRow>
 
-      <!-- The most actionable panel, so it sits above the history. -->
-      <SavingsIdeas :rows="rows" />
-
       <!-- Time series: all respect the Group by interval. -->
       <CashflowChart :rows="rows" :interval="interval" />
       <CategoryStackChart :rows="rows" :interval="interval" />
@@ -296,9 +322,15 @@ getTransactions()
       <BalanceChart :rows="rows" :interval="interval" />
       <RecurringTable :rows="rows" />
 
+      <!-- The two action panels sit together: what to change, then what to tidy. -->
+      <SavingsIdeas :rows="rows" />
+
       <!-- Data-quality panel: the numbers above are only as good as the input. -->
       <BCard v-if="quality.length" class="panel mb-4" body-class="p-3 p-md-4">
-        <h3 class="panel-title mb-3">Worth cleaning up</h3>
+        <h3 class="panel-title mb-1">Worth cleaning up</h3>
+        <p class="panel-subtitle mb-3">
+          Each of these links through to the rows it found, pre-filtered, so you can fix them there.
+        </p>
         <BAlert
           v-for="issue in quality"
           :key="issue.label"
@@ -306,9 +338,37 @@ getTransactions()
           :variant="issue.severity === 'warning' ? 'warning' : 'secondary'"
           class="text-start py-2 mb-2"
         >
-          <strong>{{ issue.label }}</strong>
-          <span v-if="issue.value"> — {{ money(issue.value) }}</span>
-          <div class="small">{{ issue.detail }}</div>
+          <div class="issue-row">
+            <div class="issue-body">
+              <strong>{{ issue.label }}</strong>
+              <span v-if="issue.value"> — {{ money(issue.value) }}</span>
+              <div class="small">{{ issue.detail }}</div>
+
+              <!-- Case-variant spellings get one link each: filter to that exact
+                   name, then bulk-rename it to the one you keep. -->
+              <div v-if="issue.id === 'category-case'" class="variant-links">
+                <template v-for="(group, gi) in issue.variants ?? []" :key="gi">
+                  <RouterLink
+                    v-for="name in group"
+                    :key="name"
+                    class="variant-chip"
+                    :to="categoryLink(name)"
+                  >
+                    {{ name }}
+                  </RouterLink>
+                </template>
+              </div>
+            </div>
+
+            <RouterLink
+              v-if="FIX_ACTIONS[issue.id]"
+              class="btn btn-sm btn-outline-light flex-shrink-0"
+              :to="FIX_ACTIONS[issue.id].to"
+            >
+              {{ FIX_ACTIONS[issue.id].label }}
+            </RouterLink>
+            <span v-else class="issue-note flex-shrink-0">{{ NO_FIX[issue.id] }}</span>
+          </div>
         </BAlert>
       </BCard>
 
@@ -398,6 +458,45 @@ getTransactions()
   font-size: 0.875rem;
   font-variant-numeric: tabular-nums;
   vertical-align: middle;
+}
+
+.issue-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.issue-body {
+  min-width: 0;
+}
+
+.issue-note {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  white-space: nowrap;
+  padding-top: 0.2rem;
+}
+
+.variant-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+
+.variant-chip {
+  font-size: 0.75rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  text-decoration: none;
+}
+
+.variant-chip:hover {
+  background: rgba(255, 255, 255, 0.22);
+  color: inherit;
 }
 
 .family-dot {

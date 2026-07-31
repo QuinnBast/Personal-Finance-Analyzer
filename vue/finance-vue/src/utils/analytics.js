@@ -1084,6 +1084,29 @@ function percentOf(share) {
   return `${Math.round((Number(share) || 0) * 100)}%`
 }
 
+
+/** The row-level tests behind the data-quality issues, shared with the
+ *  Transactions page so "fix these" lands on exactly the flagged rows. */
+export const ISSUE_TESTS = {
+  uncategorized: (r) => r.flow === 'expense' && UNCATEGORIZED.has(String(r.category ?? '').toLowerCase()),
+  'blank-type': (r) => r.type === '',
+  reversals: (r) => r.flow === 'reversal',
+}
+
+/** Rows whose date+vendor+amount+account appears more than once. */
+export function duplicateRows(rows) {
+  const groups = new Map()
+  for (const r of rows) {
+    if (r.flow === 'reversal') continue
+    const k = `${r.date.toDateString()}|${r.vendorKey}|${r.amount}|${r.account}`
+    if (!groups.has(k)) groups.set(k, [])
+    groups.get(k).push(r)
+  }
+  const out = new Set()
+  for (const g of groups.values()) if (g.length > 1) g.forEach((r) => out.add(r))
+  return out
+}
+
 /**
  * Things that make the numbers above less trustworthy. Surfacing these is more
  * useful than silently charting them.
@@ -1099,6 +1122,8 @@ export function dataQuality(rows) {
   const totalSpend = rows.reduce((a, r) => a + r.spend, 0)
   if (uncategorized.length) {
     issues.push({
+      id: 'uncategorized',
+      count: uncategorized.length,
       severity: uncatSpend > totalSpend * 0.1 ? 'warning' : 'good',
       label: 'Uncategorized spending',
       detail: `${uncategorized.length} transactions (${
@@ -1117,6 +1142,10 @@ export function dataQuality(rows) {
   const dupes = [...caseGroups.values()].filter((s) => s.size > 1)
   if (dupes.length) {
     issues.push({
+      id: 'category-case',
+      count: dupes.length,
+      // The variants themselves, so the UI can offer to merge a specific pair.
+      variants: dupes.map((s) => [...s]),
       severity: 'warning',
       label: 'Category names differing only by case',
       detail: dupes.map((s) => [...s].join(' / ')).slice(0, 5).join('  ·  '),
@@ -1127,6 +1156,8 @@ export function dataQuality(rows) {
   const blankType = rows.filter((r) => r.type === '').length
   if (blankType) {
     issues.push({
+      id: 'blank-type',
+      count: blankType,
       severity: 'good',
       label: 'Transactions with no purchase type',
       detail: `${blankType} of ${rows.length} rows have a blank type (${typeGroups.size} distinct types in view).`,
@@ -1136,6 +1167,8 @@ export function dataQuality(rows) {
   const reversals = reversalSummary(rows)
   if (reversals.pairs) {
     issues.push({
+      id: 'reversals',
+      count: reversals.pairs,
       severity: 'good',
       label: 'Pre-authorisation holds netted out',
       detail: `${reversals.pairs} charge/refund pairs excluded from spending (${reversals.byVendor
@@ -1158,6 +1191,8 @@ export function dataQuality(rows) {
   }
   if (duplicates) {
     issues.push({
+      id: 'duplicates',
+      count: duplicates,
       severity: 'warning',
       label: 'Possible duplicate imports',
       detail: `${duplicates} rows repeat an identical date + vendor + amount + account.`,
